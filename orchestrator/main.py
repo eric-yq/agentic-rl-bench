@@ -29,6 +29,33 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+
+
+class _HttpxNon2xxFilter(logging.Filter):
+    """Drop httpx access lines for successful (2xx) responses.
+
+    httpx logs every request at INFO with the literal status, e.g.
+        HTTP Request: POST http://... "HTTP/1.1 200 OK"
+    With high concurrency this floods the orchestrator log. We keep
+    non-2xx lines (which actually need attention) and drop 2xx ones.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "HTTP Request:" not in msg:
+            return True
+        # Match `"HTTP/1.1 2xx ...`
+        idx = msg.find('"HTTP/')
+        if idx == -1:
+            return True
+        try:
+            status = int(msg[idx:].split(" ", 2)[1])
+        except (IndexError, ValueError):
+            return True
+        return not (200 <= status < 300)
+
+
+logging.getLogger("httpx").addFilter(_HttpxNon2xxFilter())
 log = logging.getLogger("orchestrator")
 
 
