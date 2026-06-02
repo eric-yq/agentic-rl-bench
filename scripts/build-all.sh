@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-# Build all multi-arch images (linux/amd64 + linux/arm64) and push to REGISTRY.
-# Run once on a build host with docker buildx; the same images then run
-# unchanged on c7i and c8g target instances.
+# Build images natively for the current host's architecture and push to
+# REGISTRY. Designed to run on c7i (amd64) and c8g (arm64) separately,
+# without QEMU cross-emulation.
 #
-# Auto-installs Docker + buildx if missing (Linux only). On macOS, falls back
-# to printing instructions and exits non-zero.
+# Tagging strategy:
+#   - Each build pushes to ${IMAGE_TAG}-${arch}   e.g. v1-amd64 / v1-arm64
+#   - After pushing, the script refreshes a multi-arch manifest at
+#     ${IMAGE_TAG} pointing to whatever per-arch tags currently exist
+#     in the registry. So the consumer-facing tag (v1) is always a
+#     manifest list and run hosts keep pulling `:v1`.
+#
+# Override PLATFORM to cross-build (e.g. PLATFORM=linux/arm64 on x86 host),
+# but that requires QEMU and is much slower - avoid in production.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Ensure docker + buildx + binfmt + builder are ready.
-# This handles install on bare AL2/AL2023/Ubuntu/RHEL hosts and
-# is a no-op when everything is already present.
+# Ensure docker + buildx + builder are ready (compose plugin too, harmless).
 bash scripts/ensure-docker.sh
 
 if [[ -f .env ]]; then
@@ -22,7 +27,16 @@ fi
 : "${REGISTRY:?set REGISTRY in .env (e.g. <account>.dkr.ecr.us-east-1.amazonaws.com/agentic-rl-bench)}"
 : "${IMAGE_TAG:=v1}"
 
-PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
+# Detect host arch -> docker platform string.
+case "$(uname -m)" in
+  x86_64|amd64)   HOST_ARCH=amd64 ;;
+  aarch64|arm64)  HOST_ARCH=arm64 ;;
+  *) echo "ERROR: unsupported host arch $(uname -m)" >&2; exit 1 ;;
+esac
+PLATFORM="${PLATFORM:-linux/${HOST_ARCH}}"
+ARCH_SUFFIX="${PLATFORM#linux/}"
+
+echo "==> native build for ${PLATFORM} (host: $(uname -m))"
 
 # Fetch HumanEval + MBPP-sanitized into orchestrator/datasets/ so they
 # get baked into the orchestrator image. Skipped if already present.
@@ -37,9 +51,11 @@ IMAGES=(
   "b5-sql-runner:./workers/b5-sql-runner"
 )
 
+# ---------------------------------------------------------------
 # ECR setup: login + ensure each per-image repository exists.
-# ECR doesn't auto-create repos on push; missing repos return HTTP 401
-# on blob HEAD which looks like an auth failure but isn't.
+# ECR doesn't auto-create repos on push; missing repos return 401
+# on blob HEAD which masquerades as an auth failure.
+# ---------------------------------------------------------------
 if [[ "${REGISTRY}" == *.dkr.ecr.*.amazonaws.com/* ]]; then
   if ! command -v aws >/dev/null 2>&1; then
     echo "ERROR: REGISTRY is ECR but aws CLI is not installed" >&2
@@ -48,10 +64,7 @@ if [[ "${REGISTRY}" == *.dkr.ecr.*.amazonaws.com/* ]]; then
 
   ECR_HOST="$(echo "${REGISTRY}" | cut -d/ -f1)"
   ECR_REGION="$(echo "${ECR_HOST}" | cut -d. -f4)"
-  # Repo prefix is everything after the first '/' in REGISTRY,
-  # e.g. REGISTRY=<acct>.dkr.ecr.us-east-1.amazonaws.com/agentic-rl-bench
-  #      ECR_PREFIX=agentic-rl-bench
-  ECR_PREFIX="${REGISTRY#*/}"
+  ECR_PREFIX="${REGISTRY#*/}"   # everything after first '/'
 
   echo "==> ECR login: ${ECR_HOST} (region ${ECR_REGION})"
   aws ecr get-login-password --region "${ECR_REGION}" \
@@ -76,12 +89,20 @@ if [[ "${REGISTRY}" == *.dkr.ecr.*.amazonaws.com/* ]]; then
   done
 fi
 
+# ---------------------------------------------------------------
+# Native single-arch build per image.
+# --provenance=false keeps the manifest a plain image (no
+# attestation manifest), which makes the later imagetools merge
+# clean and unambiguous.
+# ---------------------------------------------------------------
 build() {
   local name="$1" ctx="$2"
-  echo "==> building ${name} from ${ctx}"
+  local arch_tag="${REGISTRY}/${name}:${IMAGE_TAG}-${ARCH_SUFFIX}"
+  echo "==> building ${name} (${PLATFORM}) -> ${arch_tag}"
   docker buildx build \
-    --platform "${PLATFORMS}" \
-    -t "${REGISTRY}/${name}:${IMAGE_TAG}" \
+    --platform "${PLATFORM}" \
+    --provenance=false \
+    -t "${arch_tag}" \
     --push \
     "${ctx}"
 }
@@ -92,4 +113,32 @@ for entry in "${IMAGES[@]}"; do
   build "${name}" "${ctx}"
 done
 
-echo "All images pushed to ${REGISTRY} with tag ${IMAGE_TAG}"
+# ---------------------------------------------------------------
+# Refresh multi-arch manifest at ${IMAGE_TAG} pointing to whatever
+# per-arch tags currently exist in the registry. After the *first*
+# host (e.g. amd64) builds, ${IMAGE_TAG} will point to amd64 only;
+# after the second host (arm64) builds, ${IMAGE_TAG} will be a
+# proper fat manifest listing both.
+# ---------------------------------------------------------------
+echo "==> updating multi-arch manifests at :${IMAGE_TAG}"
+for entry in "${IMAGES[@]}"; do
+  name="${entry%%:*}"
+  merged="${REGISTRY}/${name}:${IMAGE_TAG}"
+  sources=()
+  for suffix in amd64 arm64; do
+    src="${REGISTRY}/${name}:${IMAGE_TAG}-${suffix}"
+    if docker buildx imagetools inspect "${src}" >/dev/null 2>&1; then
+      sources+=("${src}")
+    fi
+  done
+  if (( ${#sources[@]} == 0 )); then
+    echo "    [skip]    ${name} (no arch-tagged images found)"
+    continue
+  fi
+  echo "    [merge]   ${merged} <- ${sources[*]}"
+  docker buildx imagetools create -t "${merged}" "${sources[@]}" >/dev/null
+done
+
+echo "==> done."
+echo "    arch-specific tag: ${REGISTRY}/<image>:${IMAGE_TAG}-${ARCH_SUFFIX}"
+echo "    fat tag (consumer side): ${REGISTRY}/<image>:${IMAGE_TAG}"

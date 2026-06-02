@@ -249,8 +249,12 @@ install_compose_plugin() {
 }
 
 # Register QEMU binfmt handlers so amd64 hosts can build arm64 images
-# (and vice-versa). Idempotent; safe to call repeatedly.
+# (and vice-versa). Native single-arch builds don't need this; gate on
+# WANT_BINFMT=1 to opt in (e.g. when cross-building from a single host).
 ensure_binfmt() {
+  if [[ "${WANT_BINFMT:-0}" != "1" ]]; then
+    return 0
+  fi
   log "registering multi-arch QEMU emulators (binfmt)"
   run_priv docker run --privileged --rm tonistiigi/binfmt:latest --install all >/dev/null
 }
