@@ -19,23 +19,28 @@ import sys
 import time
 from pathlib import Path
 
-from config import CFG, Config
-from instance_meta import detect_instance
-from runners import ALL_RUNNERS
-from runners.base import BenchmarkResult
-from s3_uploader import ResultStore
-
+# Configure logging BEFORE importing runners. The runners package
+# instantiates Runner objects at import time (see runners/__init__.py),
+# which triggers e.g. B1's corpus load and its INFO log line. If we
+# configure logging after the import, those startup messages get
+# discarded by the default last-resort handler.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-
 # httpx logs every request at INFO regardless of status (e.g.
 # `HTTP Request: POST ... "HTTP/1.1 200 OK"`). At benchmark concurrency
 # this floods the log. Errors are surfaced via response.raise_for_status()
 # in the runners themselves, so suppress httpx's own access lines.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+from config import CFG, Config
+from instance_meta import detect_instance
+from runners import ALL_RUNNERS
+from runners.base import BenchmarkResult
+from s3_uploader import ResultStore
+
 log = logging.getLogger("orchestrator")
 
 
