@@ -5,6 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Make sure docker engine + compose v2 plugin are present on the run host.
+bash scripts/ensure-docker.sh
+
 if [[ -f .env ]]; then
   set -a; source .env; set +a
 fi

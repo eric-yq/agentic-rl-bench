@@ -283,6 +283,13 @@ else
   status=1
 fi
 
+if compose_ok; then
+  log "compose: $(docker compose version --short)"
+else
+  warn "compose: not found or too old (need v2.10+)"
+  status=1
+fi
+
 if docker_ok && daemon_ok; then
   log "daemon:  running"
 else
@@ -310,6 +317,9 @@ case "${OS_KIND}" in
     if ! buildx_ok; then
       install_buildx_plugin
     fi
+    if ! compose_ok; then
+      install_compose_plugin
+    fi
     ;;
   macos)
     install_docker_macos
@@ -324,8 +334,15 @@ esac
 # Re-verify
 if ! docker_ok || ! buildx_ok; then
   err "post-install verification failed"
-  err "  docker: $(docker --version 2>&1 || echo missing)"
-  err "  buildx: $(docker buildx version 2>&1 || echo missing)"
+  err "  docker:  $(docker --version 2>&1 || echo missing)"
+  err "  buildx:  $(docker buildx version 2>&1 || echo missing)"
+  err "  compose: $(docker compose version 2>&1 || echo missing)"
+  exit 1
+fi
+
+if ! compose_ok; then
+  err "compose plugin missing or too old after install"
+  err "  compose: $(docker compose version 2>&1 || echo missing)"
   exit 1
 fi
 
@@ -338,5 +355,6 @@ fi
 ensure_binfmt
 ensure_builder
 log "install complete"
-log "  docker: $(docker --version)"
-log "  buildx: $(docker buildx version | head -1)"
+log "  docker:  $(docker --version)"
+log "  buildx:  $(docker buildx version | head -1)"
+log "  compose: $(docker compose version --short)"

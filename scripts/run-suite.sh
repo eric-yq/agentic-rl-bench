@@ -12,6 +12,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Make sure docker engine + compose v2 + buildx are present on the run host.
+# Same script used at build time; idempotent if everything is already there.
+bash scripts/ensure-docker.sh
+
 if [[ -f .env ]]; then
   set -a; source .env; set +a
 fi
