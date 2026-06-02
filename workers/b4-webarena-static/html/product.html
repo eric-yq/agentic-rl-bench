@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Product</title>
+<style>body{font-family:system-ui,sans-serif;padding:2rem}</style></head>
+<body>
+<a href="/">&laquo; back</a>
+<h1>Product detail</h1>
+<p id="info">loading...</p>
+<button class="add-to-cart">Add to cart</button>
+<script>
+const id=new URLSearchParams(location.search).get('id')||'1';
+document.getElementById('info').textContent=`Item ${id} - lorem ipsum dolor sit amet, consectetur adipiscing elit.`;
+</script>
+</body></html>

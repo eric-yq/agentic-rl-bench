@@ -1,0 +1,190 @@
+# Agentic-RL Sandbox Benchmark - service topology
+# Use profiles to start/stop per benchmark group:
+#   docker compose --profile b1 up -d
+#   docker compose --profile b3 up -d
+#   docker compose --profile b4 up -d
+#   docker compose --profile b5 up -d
+#   docker compose --profile orchestrator up
+#
+# All images are multi-arch (linux/amd64 + linux/arm64)
+# so the same compose file runs on c7i and c8g unchanged.
+
+x-common-env: &common-env
+  PYTHONUNBUFFERED: "1"
+  TZ: "UTC"
+
+services:
+
+  # ===========================================================
+  # Orchestrator - runs the benchmark suite, collects metrics,
+  # uploads to S3. One per host.
+  # ===========================================================
+  orchestrator:
+    image: ${REGISTRY}/orchestrator:${IMAGE_TAG}
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    container_name: arl-orchestrator
+    profiles: ["orchestrator", "all"]
+    environment:
+      <<: *common-env
+      S3_BUCKET: ${S3_BUCKET}
+      S3_PREFIX: ${S3_PREFIX}
+      AWS_REGION: ${AWS_REGION}
+      DURATION_SEC: ${DURATION_SEC}
+      CONCURRENCIES: ${CONCURRENCIES}
+      WARMUP_SEC: ${WARMUP_SEC}
+      COOLDOWN_SEC: ${COOLDOWN_SEC}
+      PRICE_C7I_4XL: ${PRICE_C7I_4XL}
+      PRICE_C8G_4XL: ${PRICE_C8G_4XL}
+      B8_TRIALS: ${B8_TRIALS}
+      SKIP: ${SKIP:-}
+      # Service endpoints (used by runners)
+      B1_WORKER_URL: http://b1-codeexec-worker:8001
+      B3_API_URL: http://b3-mock-api:8003
+      B4_WORKER_URL: http://b4-playwright-worker:8004
+      B4_TARGET_URL: http://b4-webarena-static:80
+      B5_PG_DSN: postgresql://bench:bench@b5-postgres:5432/bench
+    volumes:
+      - ./results:/results
+      - /var/run/docker.sock:/var/run/docker.sock  # for B8 cold-start tests
+      - ~/.aws:/root/.aws:ro                       # for S3 upload (optional, IMDS works too)
+    networks:
+      - bench-net
+    depends_on:
+      - b1-codeexec-worker
+      - b3-mock-api
+      - b4-playwright-worker
+      - b4-webarena-static
+      - b5-postgres
+
+  # ===========================================================
+  # B1 - Code execution worker (Python)
+  # Long-running container; orchestrator submits code via HTTP
+  # ===========================================================
+  b1-codeexec-worker:
+    image: ${REGISTRY}/b1-codeexec:${IMAGE_TAG}
+    build:
+      context: ./workers/b1-codeexec
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    container_name: arl-b1-worker
+    profiles: ["b1", "b9", "all"]
+    environment:
+      <<: *common-env
+      WORKERS: "32"   # internal concurrency capacity
+    deploy:
+      resources:
+        limits:
+          cpus: "16"
+          memory: 8G
+    networks:
+      - bench-net
+
+  # ===========================================================
+  # B3 - Mock tool/API server (FastAPI + SQLite)
+  # ===========================================================
+  b3-mock-api:
+    image: ${REGISTRY}/b3-mock-api:${IMAGE_TAG}
+    build:
+      context: ./workers/b3-mock-api
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    container_name: arl-b3-api
+    profiles: ["b3", "b9", "all"]
+    environment:
+      <<: *common-env
+      UVICORN_WORKERS: "4"
+    networks:
+      - bench-net
+
+  # ===========================================================
+  # B4 - Playwright headless Chromium worker
+  # ===========================================================
+  b4-playwright-worker:
+    image: ${REGISTRY}/b4-playwright:${IMAGE_TAG}
+    build:
+      context: ./workers/b4-playwright
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    container_name: arl-b4-worker
+    profiles: ["b4", "all"]
+    environment:
+      <<: *common-env
+      TARGET_URL: http://b4-webarena-static:80
+      MAX_CONTEXTS: "16"
+    shm_size: "2gb"
+    ipc: host
+    cap_add:
+      - SYS_ADMIN
+    networks:
+      - bench-net
+    depends_on:
+      - b4-webarena-static
+
+  # ===========================================================
+  # B4 dep - static WebArena snapshot (nginx serving HTML)
+  # ===========================================================
+  b4-webarena-static:
+    image: ${REGISTRY}/b4-webarena-static:${IMAGE_TAG}
+    build:
+      context: ./workers/b4-webarena-static
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    container_name: arl-b4-target
+    profiles: ["b4", "all"]
+    networks:
+      - bench-net
+
+  # ===========================================================
+  # B5 - PostgreSQL (multi-arch official) + SQL runner
+  # ===========================================================
+  b5-postgres:
+    image: postgres:16
+    container_name: arl-b5-postgres
+    profiles: ["b5", "b9", "all"]
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=2GB"
+      - "-c"
+      - "max_connections=500"
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 8G
+    networks:
+      - bench-net
+
+  b5-sql-runner:
+    image: ${REGISTRY}/b5-sql-runner:${IMAGE_TAG}
+    build:
+      context: ./workers/b5-sql-runner
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    container_name: arl-b5-runner
+    profiles: ["b5", "b9", "all"]
+    environment:
+      <<: *common-env
+      PG_DSN: postgresql://bench:bench@b5-postgres:5432/bench
+    networks:
+      - bench-net
+    depends_on:
+      - b5-postgres
+
+networks:
+  bench-net:
+    driver: bridge

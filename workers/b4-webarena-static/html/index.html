@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bench Shop</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:0;padding:1rem;background:#fafafa}
+.product{display:inline-block;width:220px;margin:.5rem;padding:1rem;background:#fff;border:1px solid #ddd;border-radius:8px}
+.product img{width:100%;height:120px;background:#eee;display:block;margin-bottom:.5rem}
+button{padding:.5rem 1rem;background:#0066cc;color:#fff;border:0;border-radius:4px;cursor:pointer}
+nav{background:#222;color:#fff;padding:.75rem 1rem;margin:-1rem -1rem 1rem}
+nav a{color:#fff;margin-right:1rem;text-decoration:none}
+</style>
+</head>
+<body>
+<nav><a href="/">Home</a><a href="/cart.html">Cart</a><a href="/profile.html">Profile</a></nav>
+<h1>Featured items</h1>
+<div id="grid">
+<script>
+const grid=document.getElementById('grid');
+for(let i=1;i<=24;i++){
+  const d=document.createElement('div');d.className='product';
+  d.innerHTML=`<img alt><h3>Item ${i}</h3><p>$${(i*1.99).toFixed(2)}</p>
+  <a class="product-link" href="/product.html?id=${i}">Details</a>
+  <button class="add-to-cart" data-sku="SKU-${i}">Add to cart</button>`;
+  grid.appendChild(d);
+}
+document.addEventListener('click',e=>{
+  if(e.target.matches('.add-to-cart')){
+    e.target.textContent='Added!';
+  }
+});
+</script>
+</div>
+</body></html>
