@@ -2,39 +2,49 @@
 
 The b1-codeexec-worker exposes POST /run {code, timeout}
 returning {exit_code, stdout, stderr, wall_ms}.
-We submit a corpus of HumanEval-style snippets in random order.
+
+We feed it a corpus of HumanEval + MBPP-sanitized canonical solutions
+(plus their assert-style test cases). Each snippet is a self-contained
+program that exits 0 on success, non-zero on assertion failure - which
+mirrors how a real Agentic-RL sandbox verifies an LLM-generated patch.
+
+Workload model is time-driven (run for `duration_sec` at the requested
+concurrency, sample throughput / latency / resource), so corpus size
+only affects coverage and P99 stability, not wall-clock duration.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 
 import httpx
 
 from config import Config
 from metrics import LatencySink, ResourceSampler
+from .b1_corpus import load_corpus
 from .base import BenchmarkResult, Runner, cost_block, drive_load
 
 log = logging.getLogger(__name__)
 
-# A small built-in corpus; in production load HumanEval / MBPP from disk.
-CORPUS = [
-    "print(sum(i*i for i in range(1000)))",
-    "import math; print(math.factorial(15))",
-    "s='abracadabra'; print(s[::-1])",
-    "print([x for x in range(50) if x%7==0])",
-    "import json; print(json.dumps({'a':1,'b':[1,2,3]}))",
-    "def fib(n):\n a,b=0,1\n for _ in range(n): a,b=b,a+b\n return a\nprint(fib(25))",
-    "import re; print(len(re.findall(r'\\\\w+', 'the quick brown fox')))",
-    "print(sorted([3,1,4,1,5,9,2,6,5,3,5]))",
-]
+# Per-snippet timeout (seconds). A handful of HumanEval tests touch
+# brute-force / large-input edge cases, so 5s is too tight; 10s is
+# conservative but still bounds long-tail.
+SNIPPET_TIMEOUT = 10
 
 
 class B1Runner(Runner):
     name = "B1"
     workload = "codeexec"
+
+    def __init__(self) -> None:
+        self._corpus, self._breakdown = load_corpus()
+        # Shuffle once per process so different concurrency runs see the
+        # same sequence (for comparability) but workers within a run
+        # don't synchronize on the same problem at the same wall time.
+        random.Random(42).shuffle(self._corpus)
 
     async def warmup(self, cfg: Config) -> None:
         url = f"{cfg.b1_worker_url}/healthz"
@@ -55,15 +65,32 @@ class B1Runner(Runner):
         sampler.start()
 
         url = f"{cfg.b1_worker_url}/run"
-        client = httpx.AsyncClient(timeout=30.0, limits=httpx.Limits(max_connections=concurrency * 2))
+        client = httpx.AsyncClient(
+            timeout=SNIPPET_TIMEOUT * 3,
+            limits=httpx.Limits(max_connections=concurrency * 2),
+        )
         idx = {"i": 0}
+        # exit_code != 0 means user code failed (assertion etc.). We still
+        # count it as a successful sandbox roundtrip for throughput, but
+        # track the rate so the report can flag if a workload regressed.
+        passes = {"n": 0}
+        n = len(self._corpus)
 
         async def one_call() -> float:
-            code = CORPUS[idx["i"] % len(CORPUS)]
+            i = idx["i"] % n
             idx["i"] += 1
+            code = self._corpus[i]
             t0 = time.perf_counter()
-            r = await client.post(url, json={"code": code, "timeout": 5})
+            r = await client.post(
+                url,
+                json={"code": code, "timeout": SNIPPET_TIMEOUT},
+            )
             r.raise_for_status()
+            try:
+                if r.json().get("exit_code") == 0:
+                    passes["n"] += 1
+            except Exception:
+                pass
             return (time.perf_counter() - t0) * 1000.0
 
         try:
@@ -78,6 +105,7 @@ class B1Runner(Runner):
             res = await sampler.stop()
 
         tps = ops / cfg.duration_sec
+        pass_rate = (passes["n"] / ops) if ops else 0.0
         return BenchmarkResult(
             benchmark=self.name,
             instance=instance,
@@ -87,5 +115,10 @@ class B1Runner(Runner):
             latency_ms=sink.summary(),
             resource=res,
             cost=cost_block(tps, cfg.duration_sec, instance["instance_type"], cfg),
-            extra={"corpus_size": len(CORPUS)},
+            extra={
+                "corpus_size": n,
+                "corpus_breakdown": self._breakdown,
+                "snippet_timeout_sec": SNIPPET_TIMEOUT,
+                "pass_rate": round(pass_rate, 4),
+            },
         )

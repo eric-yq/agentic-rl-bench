@@ -24,6 +24,10 @@ fi
 
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 
+# Fetch HumanEval + MBPP-sanitized into orchestrator/datasets/ so they
+# get baked into the orchestrator image. Skipped if already present.
+bash scripts/fetch-datasets.sh
+
 IMAGES=(
   "orchestrator:./orchestrator"
   "b1-codeexec:./workers/b1-codeexec"
