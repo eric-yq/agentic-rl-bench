@@ -54,12 +54,11 @@ services:
       - ~/.aws:/root/.aws:ro                       # for S3 upload (optional, IMDS works too)
     networks:
       - bench-net
-    depends_on:
-      - b1-codeexec-worker
-      - b3-mock-api
-      - b4-playwright-worker
-      - b4-webarena-static
-      - b5-postgres
+    # Note: depends_on intentionally omitted. Service startup is managed
+    # explicitly by scripts/run-single.sh / run-suite.sh (which start only
+    # the workers a given benchmark needs). Listing cross-profile deps
+    # here would make `docker compose ... orchestrator` fail with
+    # "undefined service" when only some profiles are active.
 
   # ===========================================================
   # B1 - Code execution worker (Python)

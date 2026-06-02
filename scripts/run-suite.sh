@@ -2,9 +2,11 @@
 # Run the full benchmark suite on the current host (c7i or c8g).
 #
 # Workflow:
-#   - bring up worker services (compose profile "all")
+#   - ensure docker + compose v2
+#   - login to ECR + pull all pinned images (no local rebuilds)
+#   - bring up worker services
 #   - launch orchestrator container which sweeps each benchmark
-#   - on completion, tear everything down
+#   - tear everything down on completion
 #
 # Results land in ./results/ and (if S3_BUCKET set) under
 # s3://${S3_BUCKET}/${S3_PREFIX}/<arch>/...
@@ -23,23 +25,37 @@ fi
 : "${REGISTRY:?set REGISTRY in .env}"
 : "${IMAGE_TAG:=v1}"
 
+# shellcheck disable=SC1091
+source scripts/_lib.sh
+
 mkdir -p results
 
-# Pre-pull pinned image used by B8 cold-start tests
+WORKERS=(
+  b1-codeexec-worker
+  b3-mock-api
+  b4-webarena-static
+  b4-playwright-worker
+  b5-postgres
+  b5-sql-runner
+)
+
+ecr_login_if_needed
+
+# Pull all pre-built images so compose doesn't fall back to building locally.
+compose_pull orchestrator "${WORKERS[@]}"
+
+# B8 cold-start trials spawn this image directly via the docker socket.
 docker pull python:3.11-slim || true
 
 echo "==> bringing up worker services"
-docker compose --profile all up -d \
-  b1-codeexec-worker b3-mock-api \
-  b4-playwright-worker b4-webarena-static \
-  b5-postgres
+docker compose --profile all up -d --no-build "${WORKERS[@]}"
 
-echo "==> waiting for services to be healthy"
+echo "==> waiting for services to settle"
 sleep 10
 
 echo "==> running orchestrator"
-docker compose --profile orchestrator run --rm orchestrator || rc=$?
-rc=${rc:-0}
+rc=0
+docker compose --profile orchestrator run --rm --no-deps orchestrator || rc=$?
 
 echo "==> tearing down"
 docker compose --profile all down --remove-orphans
