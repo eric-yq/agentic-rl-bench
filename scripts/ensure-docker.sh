@@ -71,6 +71,22 @@ log "host: $(uname -srm) | distro: ${OS_ID:-?} ${OS_VER:-?}"
 docker_ok()  { need_cmd docker; }
 buildx_ok()  { docker buildx version >/dev/null 2>&1; }
 daemon_ok()  { docker info >/dev/null 2>&1; }
+# Compose v2 plugin: must support `--profile` (added in v2.x).
+# Anything < 2.10 has buggy / missing profile semantics for our use.
+compose_ok() {
+  docker compose version >/dev/null 2>&1 || return 1
+  local ver major minor
+  ver="$(docker compose version --short 2>/dev/null | tr -d 'v' || true)"
+  major="${ver%%.*}"
+  minor="${ver#*.}"; minor="${minor%%.*}"
+  [[ "${major}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${minor}" =~ ^[0-9]+$ ]] || return 1
+  # Need >= 2.10 for stable --profile support
+  if (( major > 2 )) || { (( major == 2 )) && (( minor >= 10 )); }; then
+    return 0
+  fi
+  return 1
+}
 
 # ---------- installers ----------
 install_amzn() {
@@ -202,6 +218,27 @@ install_buildx_plugin() {
   esac
   local url="https://github.com/docker/buildx/releases/download/${tag}/buildx-${tag}.linux-${arch}"
   local dest="/usr/libexec/docker/cli-plugins/docker-buildx"
+  run_priv mkdir -p "$(dirname "${dest}")"
+  if need_cmd curl; then
+    run_priv sh -c "curl -fsSL '${url}' -o '${dest}'"
+  else
+    run_priv sh -c "wget -qO '${dest}' '${url}'"
+  fi
+  run_priv chmod +x "${dest}"
+}
+
+# Standalone docker compose v2 plugin install. AL2023 default repos don't
+# ship docker-compose-plugin; download the official release binary directly.
+install_compose_plugin() {
+  log "installing docker compose v2 CLI plugin from GitHub release"
+  local arch tag="v2.29.7"
+  case "$(uname -m)" in
+    x86_64|amd64)   arch="x86_64" ;;
+    aarch64|arm64)  arch="aarch64" ;;
+    *) err "unsupported arch $(uname -m) for compose plugin"; return 1 ;;
+  esac
+  local url="https://github.com/docker/compose/releases/download/${tag}/docker-compose-linux-${arch}"
+  local dest="/usr/libexec/docker/cli-plugins/docker-compose"
   run_priv mkdir -p "$(dirname "${dest}")"
   if need_cmd curl; then
     run_priv sh -c "curl -fsSL '${url}' -o '${dest}'"
