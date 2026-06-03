@@ -1,10 +1,32 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>Cart</title>
-<style>body{font-family:system-ui,sans-serif;padding:2rem}</style></head>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cart</title>
+<link rel="stylesheet" href="/style.css">
+</head>
 <body>
-<a href="/">&laquo; back</a>
-<h1>Cart</h1>
-<ul><li>Item 1 x1 - $1.99</li><li>Item 2 x2 - $3.98</li></ul>
-<p>Total: $5.97</p>
-<button>Checkout</button>
-</body></html>
+<nav>
+  <a href="/">Home</a>
+  <a href="/cart.html">Cart</a>
+  <a href="/orders.html">Orders</a>
+  <a href="/profile.html">Profile</a>
+</nav>
+
+<main>
+  <h1>Shopping cart</h1>
+  <table id="cart-table" class="cart">
+    <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Subtotal</th></tr></thead>
+    <tbody id="cart-body"></tbody>
+  </table>
+  <p class="totals">Total: <span id="cart-total">$0.00</span></p>
+  <a id="checkout-link" class="btn primary" href="/checkout.html">Proceed to checkout</a>
+</main>
+
+<script src="/data.js"></script>
+<script src="/app.js"></script>
+<script>
+  Shop.boot({ container: 'cart-body', mode: 'cart' });
+</script>
+</body>
+</html>

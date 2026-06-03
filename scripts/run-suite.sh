@@ -35,7 +35,6 @@ WORKERS=(
   b3-mock-api
   b4-webarena-static
   b4-playwright-worker
-  b5-postgres
   b5-sql-runner
 )
 

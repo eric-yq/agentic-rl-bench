@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Bench Shop</title>
+<title>Search results</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -18,15 +18,13 @@
 </nav>
 
 <main>
-  <h1>Featured items</h1>
+  <h1 id="search-title">Search results</h1>
   <div class="toolbar">
     <button class="sort-price">Sort by price</button>
     <button class="sort-rating">Sort by rating</button>
     <button class="sort-name">Sort by name</button>
   </div>
-
   <div id="grid" class="grid"></div>
-
   <div class="pagination">
     <button id="load-more">Load more</button>
     <span id="page-info"></span>
@@ -36,8 +34,7 @@
 <script src="/data.js"></script>
 <script src="/app.js"></script>
 <script>
-  // Initial render: top page (24 items).
-  Shop.boot({ container: 'grid', mode: 'index', pageSize: 24 });
+  Shop.boot({ container: 'grid', mode: 'search', pageSize: 12 });
 </script>
 </body>
 </html>

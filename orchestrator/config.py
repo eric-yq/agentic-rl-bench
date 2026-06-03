@@ -38,7 +38,7 @@ class Config:
     b3_api_url: str = field(default_factory=lambda: os.getenv("B3_API_URL", "http://b3-mock-api:8003"))
     b4_worker_url: str = field(default_factory=lambda: os.getenv("B4_WORKER_URL", "http://b4-playwright-worker:8004"))
     b4_target_url: str = field(default_factory=lambda: os.getenv("B4_TARGET_URL", "http://b4-webarena-static:80"))
-    b5_pg_dsn: str = field(default_factory=lambda: os.getenv("B5_PG_DSN", "postgresql://bench:bench@b5-postgres:5432/bench"))
+    b5_worker_url: str = field(default_factory=lambda: os.getenv("B5_WORKER_URL", "http://b5-sql-runner:8005"))
 
     # B8 cold-start
     b8_trials: int = field(default_factory=lambda: int(os.getenv("B8_TRIALS", "1000")))

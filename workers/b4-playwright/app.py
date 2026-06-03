@@ -1,9 +1,8 @@
 """B4 worker - Playwright headless Chromium service.
 
-Maintains a single browser process; per request creates a fresh
-BrowserContext (isolated cookies/storage) and replays a step list.
-This matches how Agentic-RL frameworks typically use Playwright:
-one browser, many contexts.
+One persistent browser, per-request fresh BrowserContext (isolated
+cookies/storage). Each request replays a step list and reports per-
+step success so the orchestrator can compute a selector miss rate.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ from playwright.async_api import async_playwright, Browser
 from pydantic import BaseModel
 
 MAX_CONTEXTS = int(os.getenv("MAX_CONTEXTS", "8"))
+ACTION_TIMEOUT_MS = int(os.getenv("ACTION_TIMEOUT_MS", "2000"))
 
 _browser: Browser | None = None
 _pw = None
@@ -58,7 +58,9 @@ class TaskRequest(BaseModel):
 
 class TaskResponse(BaseModel):
     wall_ms: float
-    steps_done: int
+    steps_done: int       # steps that ran without throwing
+    steps_failed: int     # selector misses, type/click/wait timeouts
+    actions: int          # total step count requested
 
 
 @app.get("/healthz")
@@ -72,6 +74,7 @@ async def task(req: TaskRequest) -> TaskResponse:
         raise HTTPException(503, "browser not ready")
     t0 = time.perf_counter()
     done = 0
+    failed = 0
     async with _sem:
         ctx = await _browser.new_context(viewport={"width": 1280, "height": 800})
         try:
@@ -79,30 +82,41 @@ async def task(req: TaskRequest) -> TaskResponse:
             for step in req.steps:
                 a = step.action
                 args = step.args
-                if a == "goto":
-                    path = args.get("path", "/")
-                    await page.goto(req.target_url + path, wait_until="domcontentloaded")
-                elif a == "click":
-                    sel = args.get("selector")
-                    try:
-                        await page.click(sel, timeout=2000)
-                    except Exception:
-                        # selector not found is acceptable in synthetic pages
-                        pass
-                elif a == "scroll":
-                    await page.evaluate(f"window.scrollBy(0, {int(args.get('y', 400))})")
-                elif a == "type":
-                    sel = args.get("selector", "input")
-                    text = args.get("text", "")
-                    try:
-                        await page.fill(sel, text, timeout=2000)
-                    except Exception:
-                        pass
-                elif a == "screenshot":
-                    await page.screenshot(full_page=False, type="png")
-                else:
-                    raise HTTPException(400, f"unknown action: {a}")
-                done += 1
+                try:
+                    if a == "goto":
+                        path = args.get("path", "/")
+                        await page.goto(req.target_url + path,
+                                        wait_until="domcontentloaded",
+                                        timeout=10_000)
+                    elif a == "click":
+                        sel = args.get("selector")
+                        await page.click(sel, timeout=ACTION_TIMEOUT_MS)
+                    elif a == "scroll":
+                        await page.evaluate(
+                            f"window.scrollBy(0, {int(args.get('y', 400))})"
+                        )
+                    elif a == "type":
+                        sel = args.get("selector", "input")
+                        text = args.get("text", "")
+                        await page.fill(sel, text, timeout=ACTION_TIMEOUT_MS)
+                    elif a == "screenshot":
+                        # Synthetic encode benchmark - keep PNG so Skia
+                        # actually compresses (vs JPEG which is ~free).
+                        await page.screenshot(full_page=False, type="png")
+                    else:
+                        raise HTTPException(400, f"unknown action: {a}")
+                    done += 1
+                except HTTPException:
+                    raise
+                except Exception:
+                    # Selector misses, fill timeouts: real LLM agents
+                    # also miss occasionally; record but don't abort.
+                    failed += 1
         finally:
             await ctx.close()
-    return TaskResponse(wall_ms=(time.perf_counter() - t0) * 1000.0, steps_done=done)
+    return TaskResponse(
+        wall_ms=(time.perf_counter() - t0) * 1000.0,
+        steps_done=done,
+        steps_failed=failed,
+        actions=len(req.steps),
+    )
