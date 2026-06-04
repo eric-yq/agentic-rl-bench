@@ -21,7 +21,7 @@ import httpx
 from config import Config
 from metrics import LatencySink, ResourceSampler
 from .b4_trajectories import build_trajectories
-from .base import BenchmarkResult, Runner, cost_block, drive_load
+from .base import BenchmarkResult, Runner, cost_block, drive_load, schedule_sampler_reset
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ class B4Runner(Runner):
         sink = LatencySink()
         sampler = ResourceSampler()
         sampler.start()
+        _reset_task = schedule_sampler_reset(sampler, cfg.warmup_sec, self.name)
 
         url = f"{cfg.b4_worker_url}/task"
         # Browser context creation is heavy; allow generous per-task budget.
@@ -98,6 +99,7 @@ class B4Runner(Runner):
                 one_trajectory,
                 concurrency=concurrency,
                 duration_sec=cfg.duration_sec,
+                warmup_sec=cfg.warmup_sec,
                 sink=sink,
             )
         finally:

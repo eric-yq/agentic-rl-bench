@@ -54,11 +54,15 @@ def _child_main(
     work_factory_pickled: bytes,
     concurrency: int,
     duration_sec: float,
+    warmup_sec: float,
     seed_base: int,
     out_q: mp.Queue,
 ) -> None:
-    """Run an asyncio event loop with `concurrency` workers for
-    `duration_sec` seconds. Send the result dict back via `out_q`.
+    """Run an asyncio event loop with `concurrency` workers.
+
+    Skips counting / latency recording for the first `warmup_sec`
+    seconds. The total wall budget is `warmup_sec + duration_sec`.
+    Sends the result dict back via `out_q`.
     """
     # Use uvloop in children too.
     try:
@@ -78,19 +82,48 @@ def _child_main(
             setup=setup, seed_base=seed_base, concurrency=concurrency,
         )
         latencies: list[float] = []
+        # Optional named channels - runners use these for per-sub-task
+        # latency distributions (B9 splits B1/B3/B5; B5 splits Q01..Q22).
+        channels: dict[str, list[float]] = {}
+        counters: dict[str, float] = {}
         completed = 0
         errors = 0
-        end_at = time.monotonic() + duration_sec
+        measure_start = time.monotonic() + warmup_sec
+        end_at = measure_start + duration_sec
 
         async def worker():
             nonlocal completed, errors
             while time.monotonic() < end_at:
                 try:
-                    lat = await work_fn()
-                    if lat is not None:
-                        latencies.append(lat)
+                    result = await work_fn()
+                    if time.monotonic() < measure_start:
+                        continue
+                    if result is None:
+                        continue
+                    # Accept either a plain latency float, or a dict
+                    # {"wall_ms": float, "counters": {...},
+                    #  "channels": {name: float, ...}} for runners
+                    # that need to aggregate sub-task latency / counters.
+                    if isinstance(result, dict):
+                        lat = result.get("wall_ms")
+                        if lat is not None:
+                            latencies.append(lat)
+                            completed += 1
+                        for k, v in result.get("counters", {}).items():
+                            counters[k] = counters.get(k, 0) + v
+                        for k, v in result.get("channels", {}).items():
+                            # v can be a single float or a list of floats
+                            ch = channels.setdefault(k, [])
+                            if isinstance(v, (list, tuple)):
+                                ch.extend(v)
+                            else:
+                                ch.append(v)
+                    else:
+                        latencies.append(result)
                         completed += 1
                 except Exception:
+                    if time.monotonic() < measure_start:
+                        continue
                     errors += 1
 
         tasks = [asyncio.create_task(worker()) for _ in range(concurrency)]
@@ -105,13 +138,19 @@ def _child_main(
             "completed": completed,
             "errors": errors,
             "latencies_ms": latencies,
+            "channels": channels,
+            "counters": counters,
         }
 
     try:
         result = asyncio.run(_run())
         out_q.put(result)
     except Exception as e:
-        out_q.put({"completed": 0, "errors": 0, "latencies_ms": [], "child_error": repr(e)})
+        out_q.put({
+            "completed": 0, "errors": 0,
+            "latencies_ms": [], "channels": {}, "counters": {},
+            "child_error": repr(e),
+        })
 
 
 # ---------------------------------------------------------------
@@ -126,9 +165,14 @@ async def drive_load_mp(
     duration_sec: float,
     nprocs: int | None = None,
     seed_base: int = 0,
+    warmup_sec: float = 0.0,
 ) -> dict:
     """Spawn `nprocs` child processes, each driving `concurrency/nprocs`
     workers. Aggregate their results.
+
+    Each child runs `warmup_sec` seconds of unmeasured load before the
+    counted `duration_sec` window, so latency / throughput numbers
+    reflect the steady state.
 
     `work_factory` is an async function `(setup, seed_base, concurrency) ->
     (work_fn, teardown)` where `work_fn()` returns a latency in ms per
@@ -164,6 +208,7 @@ async def drive_load_mp(
                 work_factory_pickled=factory_blob,
                 concurrency=c,
                 duration_sec=duration_sec,
+                warmup_sec=warmup_sec,
                 seed_base=seed_base + i * 1_000_003,
                 out_q=out_q,
             ),
@@ -184,8 +229,28 @@ async def drive_load_mp(
     total_completed = sum(r.get("completed", 0) for r in results)
     total_errors = sum(r.get("errors", 0) for r in results)
     all_lat: list[float] = []
+    counters_total: dict[str, float] = {}
+    channels_total: dict[str, list[float]] = {}
     for r in results:
         all_lat.extend(r.get("latencies_ms", []))
+        for k, v in r.get("counters", {}).items():
+            counters_total[k] = counters_total.get(k, 0) + v
+        for k, vs in r.get("channels", {}).items():
+            channels_total.setdefault(k, []).extend(vs)
+
+    def _summarise(arr_in: list[float]) -> dict:
+        if not arr_in:
+            return {"count": 0, "p50": None, "p95": None, "p99": None,
+                    "mean": None, "max": None}
+        a = np.array(arr_in)
+        return {
+            "count": int(a.size),
+            "p50": float(np.percentile(a, 50)),
+            "p95": float(np.percentile(a, 95)),
+            "p99": float(np.percentile(a, 99)),
+            "mean": float(a.mean()),
+            "max": float(a.max()),
+        }
 
     if all_lat:
         arr = np.array(all_lat)
@@ -205,10 +270,14 @@ async def drive_load_mp(
             "mean": None, "max": None,
         }
 
+    channel_summary = {k: _summarise(v) for k, v in channels_total.items()}
+
     return {
         "completed": total_completed,
         "errors": total_errors,
         "latency_ms": latency_summary,
+        "channels": channel_summary,
+        "counters": counters_total,
         "nprocs": len(procs),
         "concurrency_per_proc": per_proc,
         "per_child": [

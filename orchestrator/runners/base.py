@@ -86,6 +86,26 @@ class Runner:
         raise NotImplementedError
 
 
+def schedule_sampler_reset(
+    sampler, warmup_sec: float, name: str = "?",
+) -> "asyncio.Task | None":
+    """Reset `sampler` after `warmup_sec` seconds so its averages reflect
+    the steady-state phase only. No-op when warmup_sec <= 0.
+
+    Returns the scheduled Task (caller should keep a reference so the
+    task isn't garbage-collected before it fires) or None.
+    """
+    if warmup_sec <= 0:
+        return None
+
+    async def _reset():
+        await asyncio.sleep(warmup_sec)
+        sampler.reset()
+        log.info("[%s] warmup window done; resource sampler reset", name)
+
+    return asyncio.create_task(_reset())
+
+
 # -----------------------------------------------------------------
 # Generic load-driver: spawn N worker tasks for a fixed duration
 # -----------------------------------------------------------------
@@ -95,13 +115,21 @@ async def drive_load(
     concurrency: int,
     duration_sec: float,
     sink: LatencySink,
+    warmup_sec: float = 0.0,
 ) -> int:
-    """Run `work_fn()` repeatedly under `concurrency` workers for `duration_sec`.
+    """Run `work_fn()` repeatedly under `concurrency` workers.
+
+    If `warmup_sec > 0`, run that long first WITHOUT counting any
+    completions or recording latencies - this lets connection pools,
+    interpreter caches and host TCP windows reach steady state before
+    we start measuring.
 
     `work_fn` should be an async callable returning latency in ms,
-    or raising on error. Returns total successful operations.
+    or raising on error. Returns total successful operations during
+    the measurement window only.
     """
-    end_at = time.monotonic() + duration_sec
+    measure_start = time.monotonic() + warmup_sec
+    end_at = measure_start + duration_sec
     # asyncio is single-threaded; no lock needed for the counter, and
     # adding `async with lock` here measurably hurts throughput because
     # each += pays an extra event-loop round-trip.
@@ -112,10 +140,15 @@ async def drive_load(
         while time.monotonic() < end_at:
             try:
                 lat = await work_fn()
+                if time.monotonic() < measure_start:
+                    # Still warming up: discard.
+                    continue
                 if lat is not None:
                     sink.record(lat)
                     completed += 1
             except Exception as e:  # noqa: BLE001
+                if time.monotonic() < measure_start:
+                    continue
                 sink.fail()
                 log.debug("worker error: %s", e)
 

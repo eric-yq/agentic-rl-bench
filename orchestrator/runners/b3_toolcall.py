@@ -23,9 +23,9 @@ import time
 import httpx
 
 from config import Config
-from metrics import LatencySink, ResourceSampler
+from metrics import ResourceSampler
 from .b3_trajectories import build_trajectories
-from .base import BenchmarkResult, Runner, cost_block
+from .base import BenchmarkResult, Runner, cost_block, schedule_sampler_reset
 from .multiproc import drive_load_mp
 
 log = logging.getLogger(__name__)
@@ -97,10 +97,17 @@ class B3Runner(Runner):
         sampler = ResourceSampler()
         sampler.start()
 
+        # Discard sampler readings collected during warmup so resource
+        # numbers reflect the steady-state measurement phase only.
+        reset_task = schedule_sampler_reset(sampler, cfg.warmup_sec, name=self.name)
+
         setup = {
             "base_url": cfg.b3_api_url,
             "trajectories": self._traj_flat,
         }
+
+        log.info("[B3] warmup=%ds + measure=%ds @ concurrency=%d",
+                 cfg.warmup_sec, cfg.duration_sec, concurrency)
 
         try:
             mp_result = await drive_load_mp(
@@ -108,10 +115,17 @@ class B3Runner(Runner):
                 setup=setup,
                 concurrency=concurrency,
                 duration_sec=cfg.duration_sec,
+                warmup_sec=cfg.warmup_sec,
                 nprocs=cfg.client_nprocs or None,
                 seed_base=0xB3 ^ concurrency,
             )
         finally:
+            if reset_task is not None and not reset_task.done():
+                reset_task.cancel()
+                try:
+                    await reset_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             res = await sampler.stop()
 
         ops = mp_result["completed"]

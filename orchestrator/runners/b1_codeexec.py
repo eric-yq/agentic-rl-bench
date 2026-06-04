@@ -25,7 +25,7 @@ import httpx
 from config import Config
 from metrics import LatencySink, ResourceSampler
 from .b1_corpus import load_corpus
-from .base import BenchmarkResult, Runner, cost_block, drive_load
+from .base import BenchmarkResult, Runner, cost_block, drive_load, schedule_sampler_reset
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ class B1Runner(Runner):
         sink = LatencySink()
         sampler = ResourceSampler()
         sampler.start()
+        _reset_task = schedule_sampler_reset(sampler, cfg.warmup_sec, self.name)
 
         url = f"{cfg.b1_worker_url}/run"
         client = httpx.AsyncClient(
@@ -98,6 +99,7 @@ class B1Runner(Runner):
                 one_call,
                 concurrency=concurrency,
                 duration_sec=cfg.duration_sec,
+                warmup_sec=cfg.warmup_sec,
                 sink=sink,
             )
         finally:

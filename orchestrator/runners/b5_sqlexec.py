@@ -21,7 +21,7 @@ import httpx
 
 from config import Config
 from metrics import LatencySink, ResourceSampler
-from .base import BenchmarkResult, Runner, cost_block, drive_load
+from .base import BenchmarkResult, Runner, cost_block, drive_load, schedule_sampler_reset
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +69,7 @@ class B5Runner(Runner):
         per_q_sink: dict[int, LatencySink] = {q: LatencySink() for q in TPCH_QUERIES}
         sampler = ResourceSampler()
         sampler.start()
+        _reset_task = schedule_sampler_reset(sampler, cfg.warmup_sec, self.name)
 
         url = f"{cfg.b5_worker_url}/query"
         client = httpx.AsyncClient(
@@ -78,6 +79,17 @@ class B5Runner(Runner):
 
         idx = {"i": 0}
         per_q_count: dict[int, int] = {q: 0 for q in TPCH_QUERIES}
+
+        # The outer drive_load already discards latencies for the warmup
+        # window, but our per-query sinks capture inside `one_query` so
+        # we need to reset them ourselves at the same boundary.
+        async def _reset_per_q():
+            if cfg.warmup_sec > 0:
+                await asyncio.sleep(cfg.warmup_sec)
+                for q in TPCH_QUERIES:
+                    per_q_sink[q].samples.clear()
+                    per_q_count[q] = 0
+        _per_q_reset_task = asyncio.create_task(_reset_per_q())
 
         async def one_query() -> float:
             i = idx["i"]
@@ -96,6 +108,7 @@ class B5Runner(Runner):
                 one_query,
                 concurrency=concurrency,
                 duration_sec=cfg.duration_sec,
+                warmup_sec=cfg.warmup_sec,
                 sink=sink,
             )
         finally:

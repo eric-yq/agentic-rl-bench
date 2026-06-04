@@ -92,6 +92,23 @@ class ResourceSampler:
         # Prime per-process counter: first call returns 0.0.
         self._proc.cpu_percent(interval=None)
 
+    def reset(self) -> None:
+        """Discard samples collected so far without stopping the loop.
+
+        Use this after a warmup phase: the sampler keeps running but the
+        recorded series only covers the actual measurement window.
+        """
+        self.cpu_host.clear()
+        self.cpu_orch.clear()
+        self.mem_gb.clear()
+        self.ctx_switches_per_s.clear()
+        # Refresh delta counters so the next sample isn't artificially
+        # large (catching up on whatever happened during warmup).
+        self._last_ctx = psutil.cpu_stats().ctx_switches
+        self._last_t = time.monotonic()
+        self._last_idle, self._last_total = _read_cpu_totals()
+        self._proc.cpu_percent(interval=None)
+
     def _sample_host_cpu(self) -> float:
         idle, total = _read_cpu_totals()
         d_idle = idle - self._last_idle
