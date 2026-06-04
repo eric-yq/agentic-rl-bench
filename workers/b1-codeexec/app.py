@@ -2,21 +2,35 @@
 
 POST /run {code: str, timeout: int} -> {exit_code, stdout, stderr, wall_ms}
 
-Each request spawns `python -c <code>` with resource limits.
-This mirrors how a real Agentic-RL sandbox runs LLM-generated code
-(short-lived subprocess, isolated stdout/stderr, hard timeout).
+Each request spawns `python -c <code>` with resource limits applied
+via the `prlimit` wrapper (which sets rlimits BEFORE execve, then
+exec's the target). This mirrors how a real Agentic-RL sandbox runs
+LLM-generated code (short-lived subprocess, isolated stdout/stderr,
+hard timeout).
+
+Why prlimit and not asyncio's `preexec_fn`? Passing `preexec_fn=...`
+forces CPython onto its slow synchronous fork path with internal
+locking around the fork helper - measurable as a hard throughput
+cliff at moderate concurrency (~c=32 on amd64, ~c=64 on aarch64).
+prlimit lets us stay on the lock-free fork+exec fast path.
 """
 
 from __future__ import annotations
 
 import asyncio
-import resource
+import os
 import time
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 app = FastAPI()
+
+
+# Per-child resource limits. Adjustable via env so smoke tests can
+# loosen them if a snippet legitimately needs more memory.
+RSS_BYTES = int(os.getenv("B1_RSS_BYTES", str(256 * 1024 * 1024)))   # 256 MB
+CPU_SECS  = int(os.getenv("B1_CPU_SECS",  "30"))                      # 30 s
 
 
 class RunRequest(BaseModel):
@@ -32,13 +46,6 @@ class RunResponse(BaseModel):
     timed_out: bool = False
 
 
-def _set_limits() -> None:
-    # 256 MB RSS, 30s CPU, no core dumps
-    resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
-    resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-
-
 @app.get("/healthz")
 async def healthz() -> dict:
     return {"ok": True}
@@ -47,11 +54,20 @@ async def healthz() -> dict:
 @app.post("/run", response_model=RunResponse)
 async def run(req: RunRequest) -> RunResponse:
     t0 = time.perf_counter()
+
+    # `prlimit --as=N --cpu=N --core=0 -- python3 -c CODE` sets rlimits
+    # on itself, then execve's into python3 - so the target inherits
+    # the limits without us needing preexec_fn (which kills throughput
+    # under high concurrency due to CPython's slow-fork lock).
     proc = await asyncio.create_subprocess_exec(
+        "prlimit",
+        f"--as={RSS_BYTES}",
+        f"--cpu={CPU_SECS}",
+        "--core=0",
+        "--",
         "python3", "-c", req.code,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        preexec_fn=_set_limits,
     )
     timed_out = False
     try:

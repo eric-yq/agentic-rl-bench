@@ -4,9 +4,11 @@ One persistent browser, per-request fresh BrowserContext (isolated
 cookies/storage). Each request replays a step list and reports per-
 step success so the orchestrator can compute a selector miss rate.
 
-`MAX_CONTEXTS` defaults to the container's vCPU count - one context
-per core saturates Chromium's renderer threads without thrashing.
-On a 4xlarge that's 16; on 16xlarge 64; on 24xlarge 96.
+`MAX_CONTEXTS` defaults to 2x the container vCPU count. BrowserContexts
+are lightweight (~30MB, no renderer process); the 1x heuristic exactly
+matches the benchmark's typical concurrency sweep (c=16 on 4xlarge),
+creating a hard semaphore cliff at that point. 2x leaves headroom so
+c=32 / c=64 measurements actually exercise queueing under load.
 """
 
 from __future__ import annotations
@@ -23,12 +25,12 @@ from pydantic import BaseModel
 
 
 def _default_max_contexts() -> int:
-    """One context per vCPU. Honours cgroup CPU quota when present."""
+    """2x vCPU available to the container."""
     try:
         # Match docker --cpus / cgroup quota (e.g. compose `cpus: 16`).
-        return max(1, len(os.sched_getaffinity(0)))
+        return max(8, 2 * len(os.sched_getaffinity(0)))
     except Exception:
-        return os.cpu_count() or 8
+        return max(8, 2 * (os.cpu_count() or 8))
 
 
 MAX_CONTEXTS = int(os.getenv("MAX_CONTEXTS", "0")) or _default_max_contexts()

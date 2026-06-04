@@ -2,6 +2,7 @@ FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential ca-certificates \
+        util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -12,12 +13,11 @@ COPY app.py /app/app.py
 
 EXPOSE 8001
 
-# B1 forks a fresh `python -c` subprocess per request. Each request is
-# IO-bound on the asyncio event loop (waiting for the child to finish),
-# so a single uvicorn worker can already drive many concurrent forks -
-# but on 16+ vCPU instances we want multiple uvicorn processes too so
-# the syscall + JSON encode overhead is parallelised. Default to
-# matching the container's vCPU allocation.
+# B1 forks a fresh `python -c` subprocess per request (wrapped in
+# `prlimit` so we don't have to use asyncio's slow preexec_fn path,
+# which would cap throughput at ~c=32 due to CPython's fork-helper
+# lock). Multiple uvicorn worker processes parallelise the syscall +
+# JSON encode overhead. Default to one worker per container vCPU.
 ENV B1_UVICORN_WORKERS=auto
 
 CMD ["sh", "-c", "\
