@@ -58,6 +58,14 @@ class Config:
     # Run control
     skip: list[str] = field(default_factory=lambda: _csv_str(os.getenv("SKIP", "")))
 
+    # Client-side load generator: number of child processes per
+    # benchmark. 0 / unset = auto = orchestrator container vCPU count.
+    # Bump only if you find the orchestrator pegged at 100% on a
+    # single proc; lower if you want clean comparison vs other tools.
+    client_nprocs: int = field(
+        default_factory=lambda: int(os.getenv("CLIENT_NPROCS", "0"))
+    )
+
     # Output
     results_dir: str = field(default_factory=lambda: os.getenv("RESULTS_DIR", "/results"))
 

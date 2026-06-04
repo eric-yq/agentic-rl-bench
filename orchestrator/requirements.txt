@@ -3,3 +3,4 @@ boto3==1.35.40
 psutil==6.0.0
 numpy==1.26.4
 pyyaml==6.0.2
+uvloop==0.21.0

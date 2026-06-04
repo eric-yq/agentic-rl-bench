@@ -102,8 +102,10 @@ async def drive_load(
     or raising on error. Returns total successful operations.
     """
     end_at = time.monotonic() + duration_sec
+    # asyncio is single-threaded; no lock needed for the counter, and
+    # adding `async with lock` here measurably hurts throughput because
+    # each += pays an extra event-loop round-trip.
     completed = 0
-    lock = asyncio.Lock()
 
     async def worker():
         nonlocal completed
@@ -112,8 +114,7 @@ async def drive_load(
                 lat = await work_fn()
                 if lat is not None:
                     sink.record(lat)
-                    async with lock:
-                        completed += 1
+                    completed += 1
             except Exception as e:  # noqa: BLE001
                 sink.fail()
                 log.debug("worker error: %s", e)

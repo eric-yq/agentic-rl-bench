@@ -19,6 +19,16 @@ import sys
 import time
 from pathlib import Path
 
+# Use uvloop where available - the default asyncio event loop tops out
+# around 50-70k req/s per process; uvloop typically doubles that and
+# directly translates to higher CPU utilisation when many tiny HTTP
+# requests are in flight (B3 / B7 / B9 workloads).
+try:
+    import uvloop  # type: ignore
+    uvloop.install()
+except ImportError:
+    pass
+
 # Configure logging BEFORE importing runners. The runners package
 # instantiates Runner objects at import time (see runners/__init__.py),
 # which triggers e.g. B1's corpus load and its INFO log line. If we
