@@ -4,7 +4,7 @@ At startup:
   - Install + load the official `tpch` DuckDB extension
   - Run `CALL dbgen(sf=...)` to materialize the 8 standard tables
     (lineitem, orders, customer, part, partsupp, supplier, nation, region)
-  - Cache the 22 official TPC-H query texts via `tpch_queries` view
+  - Cache the 22 official TPC-H query texts via `tpch_queries()` table function
 
 Per request:
   - POST /query {q: 1..22}  -> run that TPC-H query, return wall_ms + row count
@@ -77,10 +77,10 @@ async def lifespan(app: FastAPI):
     _dbgen_sec = time.perf_counter() - t0
     print(f"[b5] dbgen done in {_dbgen_sec:.1f}s", flush=True)
 
-    # tpch_queries is a view exposed by the extension; it has columns
-    # (query_nr int, query varchar). 22 rows.
+    # The tpch extension exposes the 22 standard queries through a
+    # table function: `tpch_queries()`. Schema: (query_nr int, query varchar).
     rows = _con.execute(
-        "SELECT query_nr, query FROM tpch_queries ORDER BY query_nr"
+        "SELECT query_nr, query FROM tpch_queries() ORDER BY query_nr"
     ).fetchall()
     _query_text = {int(r[0]): r[1] for r in rows}
     print(f"[b5] cached {len(_query_text)} TPC-H query texts, ready",
