@@ -39,10 +39,21 @@ class Config:
     b4_worker_url: str = field(default_factory=lambda: os.getenv("B4_WORKER_URL", "http://b4-playwright-worker:8004"))
     b4_target_url: str = field(default_factory=lambda: os.getenv("B4_TARGET_URL", "http://b4-webarena-static:80"))
     b5_worker_url: str = field(default_factory=lambda: os.getenv("B5_WORKER_URL", "http://b5-sql-runner:8005"))
+    b7_worker_url: str = field(default_factory=lambda: os.getenv("B7_WORKER_URL", "http://b7-textgame:8007"))
 
     # B8 cold-start
     b8_trials: int = field(default_factory=lambda: int(os.getenv("B8_TRIALS", "1000")))
     b8_image: str = field(default_factory=lambda: os.getenv("B8_IMAGE", "python:3.11-slim"))
+
+    # B9 - end-to-end concurrent rollouts.
+    # Defaults: 30-minute steady state, ramp 64 -> 256 -> 1024 (override
+    # only B9_CONCURRENCIES when you want a different sweep).
+    b9_duration_sec: int = field(
+        default_factory=lambda: int(os.getenv("B9_DURATION_SEC", "1800"))
+    )
+    b9_concurrencies: list[int] = field(
+        default_factory=lambda: _csv_int(os.getenv("B9_CONCURRENCIES", "64,256,1024"))
+    )
 
     # Run control
     skip: list[str] = field(default_factory=lambda: _csv_str(os.getenv("SKIP", "")))

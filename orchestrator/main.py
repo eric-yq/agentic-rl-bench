@@ -44,6 +44,25 @@ from s3_uploader import ResultStore
 log = logging.getLogger("orchestrator")
 
 
+def _extract_p99(latency: dict) -> float:
+    """Pull a primary P99 number out of the polymorphic latency block.
+
+    Different runners use different shapes:
+      - B1/B3/B4: flat dict {p50, p95, p99, ...}
+      - B5:       {"trajectory": {p99,...}, "per_query": {...}}
+      - B9:       {"rollout":    {p99,...}, "per_task": {...}}
+    """
+    if not isinstance(latency, dict):
+        return 0.0
+    if "p99" in latency:
+        return latency.get("p99") or 0.0
+    for key in ("rollout", "trajectory"):
+        sub = latency.get(key)
+        if isinstance(sub, dict) and "p99" in sub:
+            return sub.get("p99") or 0.0
+    return 0.0
+
+
 async def run_benchmark(
     bid: str, cfg: Config, instance: dict, store: ResultStore
 ) -> list[dict]:
@@ -63,8 +82,17 @@ async def run_benchmark(
         f"{runner.workload}_result_{instance['instance_type']}_{ts}"
     )
 
-    for c in cfg.concurrencies:
-        log.info("[%s] concurrency=%d duration=%ds", bid, c, cfg.duration_sec)
+    # Per-benchmark concurrency / duration overrides. B9 in particular
+    # ramps 64 -> 256 -> 1024 over 30min, distinct from the per-bench
+    # sweep used by B1/B3/B4/B5.
+    concurrencies = cfg.concurrencies
+    duration = cfg.duration_sec
+    if bid == "B9":
+        concurrencies = cfg.b9_concurrencies
+        duration = cfg.b9_duration_sec
+
+    for c in concurrencies:
+        log.info("[%s] concurrency=%d duration=%ds", bid, c, duration)
         try:
             res: BenchmarkResult = await runner.run_one(cfg, instance, c)
         except Exception as e:
@@ -79,9 +107,7 @@ async def run_benchmark(
             "[%s] c=%d throughput=%s p99=%.1fms",
             bid, c,
             list(d["throughput"].items())[0] if d["throughput"] else "?",
-            (d["latency_ms"].get("p99")
-             if isinstance(d["latency_ms"], dict) and "p99" in d["latency_ms"]
-             else d["latency_ms"].get("trajectory", {}).get("p99", 0.0)),
+            _extract_p99(d["latency_ms"]),
         )
 
         if cfg.cooldown_sec > 0:
@@ -106,13 +132,7 @@ def render_html(summary: dict, out_path: Path) -> None:
     for bid, runs in summary["benchmarks"].items():
         for r in runs:
             tput = next(iter(r["throughput"].values()), 0) if r["throughput"] else 0
-            lat = r["latency_ms"]
-            if isinstance(lat, dict) and "p99" in lat:
-                p99 = lat.get("p99")
-            elif isinstance(lat, dict):
-                p99 = lat.get("trajectory", {}).get("p99")
-            else:
-                p99 = None
+            p99 = _extract_p99(r["latency_ms"])
             rows.append({
                 "benchmark": bid,
                 "concurrency": r["concurrency"],
@@ -187,6 +207,8 @@ async def main() -> int:
         "config": {
             "duration_sec": cfg.duration_sec,
             "concurrencies": cfg.concurrencies,
+            "b9_duration_sec": cfg.b9_duration_sec,
+            "b9_concurrencies": cfg.b9_concurrencies,
         },
         "benchmarks": {},
     }

@@ -36,6 +36,7 @@ WORKERS=(
   b4-webarena-static
   b4-playwright-worker
   b5-sql-runner
+  b7-textgame
 )
 
 ecr_login_if_needed
@@ -55,6 +56,15 @@ sleep 10
 echo "==> running orchestrator"
 rc=0
 docker compose --profile orchestrator run --rm --no-deps orchestrator || rc=$?
+
+# Dump each worker's last log lines on failure for post-mortem.
+if (( rc != 0 )); then
+  for svc in "${WORKERS[@]}"; do
+    echo "==> last logs from ${svc}:"
+    docker compose --profile all logs --tail 80 "${svc}" || true
+    echo
+  done
+fi
 
 echo "==> tearing down"
 docker compose --profile all down --remove-orphans

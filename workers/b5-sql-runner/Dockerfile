@@ -3,6 +3,12 @@
 # Multi-arch (linux/amd64 + linux/arm64). DuckDB ships official wheels
 # for both architectures; on aarch64 the vectorized executor uses
 # NEON / SVE which is the central c8g signal we want to capture.
+#
+# IMPORTANT: we pre-install the `tpch` extension at build time so the
+# runtime container does not need outbound network access. Without
+# this, the first request triggers a download from
+# extensions.duckdb.org and warmup hangs in air-gapped / restricted
+# VPCs (which is exactly what bench hosts often are).
 
 FROM python:3.11-slim
 
@@ -14,14 +20,21 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Bake the tpch extension into ~/.duckdb/extensions/ so runtime is
+# fully offline. We also load it once to verify it works on this arch.
+RUN python -c "import duckdb; \
+con = duckdb.connect(); \
+con.execute('INSTALL tpch'); \
+con.execute('LOAD tpch'); \
+print('[build] tpch extension installed:', con.execute('SELECT COUNT(*) FROM tpch_queries').fetchone())"
+
 COPY app.py /app/app.py
 
 EXPOSE 8005
 
-# uvicorn workers > 1 isn't useful here: a single duckdb in-memory
-# database can't be shared across processes. We expose concurrency
-# through asyncio.to_thread + DuckDB's internal multi-threaded
-# executor (PRAGMA threads).
+# Single uvicorn process: DuckDB's in-memory database can't be shared
+# across processes. Concurrency comes from asyncio.to_thread + DuckDB's
+# internal multi-threaded executor (PRAGMA threads=auto by default).
 ENV TPCH_SF=1.0
 ENV DUCKDB_THREADS=0
 ENV DUCKDB_MEM_LIMIT=

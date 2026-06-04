@@ -13,6 +13,16 @@ x-common-env: &common-env
   PYTHONUNBUFFERED: "1"
   TZ: "UTC"
 
+# Shared ulimits anchor. B9's high-concurrency sweeps (1024+ rollouts
+# each fanning out to 3 worker services) push the per-container open-fd
+# count well past the default 1024 ceiling. nginx + uvicorn + asyncpg-
+# style sockets all consume fds, so be generous on every long-running
+# worker. Orchestrator is excluded (transient `run --rm` container).
+x-bench-ulimits: &bench-ulimits
+  nofile:
+    soft: 65535
+    hard: 65535
+
 services:
 
   # ===========================================================
@@ -48,10 +58,12 @@ services:
       B4_WORKER_URL: http://b4-playwright-worker:8004
       B4_TARGET_URL: http://b4-webarena-static:80
       B5_WORKER_URL: http://b5-sql-runner:8005
+      B7_WORKER_URL: http://b7-textgame:8007
     volumes:
       - ./results:/results
       - /var/run/docker.sock:/var/run/docker.sock  # for B8 cold-start tests
       - ~/.aws:/root/.aws:ro                       # for S3 upload (optional, IMDS works too)
+    ulimits: *bench-ulimits
     networks:
       - bench-net
     # Note: depends_on intentionally omitted. Service startup is managed
@@ -75,12 +87,10 @@ services:
     profiles: ["b1", "b9", "all"]
     environment:
       <<: *common-env
-      WORKERS: "32"   # internal concurrency capacity
-    deploy:
-      resources:
-        limits:
-          cpus: "16"
-          memory: 8G
+      # auto = match container vCPU count (default). Override to a fixed
+      # integer when comparing different worker counts.
+      B1_UVICORN_WORKERS: "${B1_UVICORN_WORKERS:-auto}"
+    ulimits: *bench-ulimits
     networks:
       - bench-net
 
@@ -98,7 +108,11 @@ services:
     profiles: ["b3", "b9", "all"]
     environment:
       <<: *common-env
-      UVICORN_WORKERS: "4"
+      # auto = use all container vCPUs (default). Override with
+      # B3_UVICORN_WORKERS env on the host to compare fewer workers
+      # (useful for isolating per-core throughput).
+      B3_UVICORN_WORKERS: "${B3_UVICORN_WORKERS:-auto}"
+    ulimits: *bench-ulimits
     networks:
       - bench-net
 
@@ -117,11 +131,13 @@ services:
     environment:
       <<: *common-env
       TARGET_URL: http://b4-webarena-static:80
-      MAX_CONTEXTS: "16"
+      # MAX_CONTEXTS=0 -> worker auto-detects vCPU count.
+      MAX_CONTEXTS: "${B4_MAX_CONTEXTS:-0}"
     shm_size: "2gb"
     ipc: host
     cap_add:
       - SYS_ADMIN
+    ulimits: *bench-ulimits
     networks:
       - bench-net
     depends_on:
@@ -139,6 +155,7 @@ services:
         - linux/arm64
     container_name: arl-b4-target
     profiles: ["b4", "all"]
+    ulimits: *bench-ulimits
     networks:
       - bench-net
 
@@ -160,11 +177,28 @@ services:
       TPCH_SF: "${TPCH_SF:-1.0}"
       DUCKDB_THREADS: "${DUCKDB_THREADS:-0}"
       DUCKDB_MEM_LIMIT: "${DUCKDB_MEM_LIMIT:-}"
-    deploy:
-      resources:
-        limits:
-          cpus: "16"
-          memory: 12G
+    ulimits: *bench-ulimits
+    networks:
+      - bench-net
+
+  # ===========================================================
+  # B7 - text-game simulator (ALFWorld/TextWorld-style).
+  # Pure-Python; multi-process uvicorn so we exploit all vCPUs.
+  # ===========================================================
+  b7-textgame:
+    image: ${REGISTRY}/b7-textgame:${IMAGE_TAG}
+    build:
+      context: ./workers/b7-textgame
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    container_name: arl-b7-worker
+    profiles: ["b7", "all"]
+    environment:
+      <<: *common-env
+      # auto = container vCPU count.
+      B7_UVICORN_WORKERS: "${B7_UVICORN_WORKERS:-auto}"
+    ulimits: *bench-ulimits
     networks:
       - bench-net
 

@@ -58,9 +58,18 @@ async def lifespan(app: FastAPI):
     if DUCKDB_MEM_LIMIT:
         _con.execute(f"SET memory_limit='{DUCKDB_MEM_LIMIT}'")
 
-    print("[b5] installing + loading tpch extension ...", flush=True)
-    _con.execute("INSTALL tpch")
-    _con.execute("LOAD tpch")
+    # Try LOAD first (extension is baked into the image at build time);
+    # only fall back to INSTALL if it isn't there. This avoids any
+    # network access at runtime in normal operation.
+    try:
+        print("[b5] loading pre-baked tpch extension ...", flush=True)
+        _con.execute("LOAD tpch")
+    except Exception as e:
+        print(f"[b5] LOAD failed ({e}); falling back to INSTALL "
+              "(needs outbound network to extensions.duckdb.org)",
+              flush=True)
+        _con.execute("INSTALL tpch")
+        _con.execute("LOAD tpch")
 
     print(f"[b5] running dbgen(sf={TPCH_SF}) ...", flush=True)
     t0 = time.perf_counter()
@@ -74,7 +83,8 @@ async def lifespan(app: FastAPI):
         "SELECT query_nr, query FROM tpch_queries ORDER BY query_nr"
     ).fetchall()
     _query_text = {int(r[0]): r[1] for r in rows}
-    print(f"[b5] cached {len(_query_text)} TPC-H query texts", flush=True)
+    print(f"[b5] cached {len(_query_text)} TPC-H query texts, ready",
+          flush=True)
 
     yield
 

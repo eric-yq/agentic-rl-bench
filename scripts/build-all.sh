@@ -49,6 +49,7 @@ IMAGES=(
   "b4-playwright:./workers/b4-playwright"
   "b4-webarena-static:./workers/b4-webarena-static"
   "b5-sql-runner:./workers/b5-sql-runner"
+  "b7-textgame:./workers/b7-textgame"
 )
 
 # ---------------------------------------------------------------

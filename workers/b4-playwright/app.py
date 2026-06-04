@@ -3,6 +3,10 @@
 One persistent browser, per-request fresh BrowserContext (isolated
 cookies/storage). Each request replays a step list and reports per-
 step success so the orchestrator can compute a selector miss rate.
+
+`MAX_CONTEXTS` defaults to the container's vCPU count - one context
+per core saturates Chromium's renderer threads without thrashing.
+On a 4xlarge that's 16; on 16xlarge 64; on 24xlarge 96.
 """
 
 from __future__ import annotations
@@ -17,7 +21,17 @@ from fastapi import FastAPI, HTTPException
 from playwright.async_api import async_playwright, Browser
 from pydantic import BaseModel
 
-MAX_CONTEXTS = int(os.getenv("MAX_CONTEXTS", "8"))
+
+def _default_max_contexts() -> int:
+    """One context per vCPU. Honours cgroup CPU quota when present."""
+    try:
+        # Match docker --cpus / cgroup quota (e.g. compose `cpus: 16`).
+        return max(1, len(os.sched_getaffinity(0)))
+    except Exception:
+        return os.cpu_count() or 8
+
+
+MAX_CONTEXTS = int(os.getenv("MAX_CONTEXTS", "0")) or _default_max_contexts()
 ACTION_TIMEOUT_MS = int(os.getenv("ACTION_TIMEOUT_MS", "2000"))
 
 _browser: Browser | None = None

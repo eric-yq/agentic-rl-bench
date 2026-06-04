@@ -16,9 +16,9 @@
 | B4  | Browser             | ✅   | Playwright + Chromium headless，**8 个模板 → 80 条 trajectory** 跑在自托管的真实 SPA (~25KB JS) | b4-webarena-static (nginx) + b4-playwright-worker |
 | B5  | SQLExec             | ✅   | DuckDB in-process **TPC-H sf=1**，22 条标准 query 时间驱动循环          | b5-sql-runner (FastAPI + DuckDB)          |
 | B6  | DataSci             | ⏸️   | 占位                                                                  | -                                         |
-| B7  | Sim-TextGame        | ⏸️   | 占位                                                                  | -                                         |
+| B7  | Sim-TextGame        | ✅   | ALFWorld/TextWorld-style minigrid（8 房间 + 30 物品 + 6 个 goal 模板），每 episode 30–50 步纯 Python 循环 | b7-textgame (FastAPI + 多 uvicorn worker) |
 | B8  | ColdStart           | ✅   | `docker run python:3.11-slim` × N 次，挂钟测沙盒拉起开销                | orchestrator 通过 docker socket 起 container |
-| B9  | Concurrent-Rollout  | ⏸️   | 占位，复用 B1+B3+B5 的 worker 综合压                                   | -                                         |
+| B9  | Concurrent-Rollout  | ✅   | 端到端综合：每个 rollout 是 10–30 步 mini-episode，按 B3:60% / B1:25% / B5:15% 抽 task；并发 64→256→1024，**默认 30 分钟稳态** | 复用 b1-codeexec + b3-mock-api + b5-sql-runner |
 
 详细每个子项的 trajectory / corpus / 数据集来源见各 runner 模块顶部 docstring：
 
@@ -26,7 +26,9 @@
 - `orchestrator/runners/b3_toolcall.py` + `b3_trajectories.py`
 - `orchestrator/runners/b4_browser.py`   + `b4_trajectories.py`
 - `orchestrator/runners/b5_sqlexec.py`
+- `orchestrator/runners/b7_textgame.py`
 - `orchestrator/runners/b8_coldstart.py`
+- `orchestrator/runners/b9_concurrent.py`
 
 ---
 
@@ -38,7 +40,9 @@
 | B3   | FastAPI/uvicorn + JSON + SQLite 高并发 OLTP             | c8g (多核高吞吐、单价低)         |
 | B4   | V8 JIT + Skia layout/paint + Chromium 进程模型           | 趋平 (V8 在两架构都成熟)         |
 | B5   | DuckDB **列式 + SIMD 矢量化** (NEON/SVE vs AVX2/AVX-512) | c8g (内存带宽 + SVE)             |
+| B7   | Python 状态机 + 字符串处理 + GIL contention (多 worker 进程) | c8g (核多吞吐高)              |
 | B8   | 内核 syscall + container/cgroup 启动                     | c8g (新内核更顺)                 |
+| B9   | 端到端长尾放大：rollout 内最慢 step 决定整体 latency       | 视 task mix 而定，通常 c8g (并发深) |
 
 ---
 
@@ -74,7 +78,8 @@ agentic-rl-bench/
     ├── b3-mock-api/               # FastAPI + SQLite 仿 τ-bench
     ├── b4-playwright/             # Playwright headless Chromium
     ├── b4-webarena-static/        # nginx serving SPA (~25KB JS)
-    └── b5-sql-runner/             # FastAPI + DuckDB + TPC-H
+    ├── b5-sql-runner/             # FastAPI + DuckDB + TPC-H
+    └── b7-textgame/                # FastAPI + minigrid text simulator
 ```
 
 ---
@@ -184,8 +189,11 @@ orchestrator 会：
 | `COOLDOWN_SEC`    | 档位间 cooldown                                       | 60         |
 | `TPCH_SF`         | B5 DuckDB dbgen 的 scale factor                       | `1.0`      |
 | `DUCKDB_THREADS`  | B5 DuckDB worker 内部线程，0=auto                      | `0`        |
+| `B7_UVICORN_WORKERS` | B7 uvicorn worker 进程数（>= vCPU 数饱和容器）        | `8`        |
 | `B8_TRIALS`       | B8 cold-start 次数                                    | 1000       |
-| `SKIP`            | 跳过的子项 ID（CSV，e.g. `B2,B6,B7`）                  | -          |
+| `B9_DURATION_SEC` | B9 每个并发档位持续时间（秒），默认 30 分钟              | 1800       |
+| `B9_CONCURRENCIES`| B9 并发档位（CSV）                                     | `64,256,1024` |
+| `SKIP`            | 跳过的子项 ID（CSV，e.g. `B2,B6`）                     | -          |
 | `S3_BUCKET`       | 结果上传桶                                            | -          |
 | `PRICE_C7I_4XL`   | c7i.4xlarge 每小时美元（用于 cost-per-1k 换算）         | 0.7140     |
 | `PRICE_C8G_4XL`   | c8g.4xlarge 每小时美元                                | 0.6381     |

@@ -18,5 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY app.py /app/app.py
 
 EXPOSE 8004
-ENV MAX_CONTEXTS=8
+# MAX_CONTEXTS=0 (or unset) -> auto = container vCPU count.
+# Set to a fixed integer to cap (e.g. for fairness across archs).
+ENV MAX_CONTEXTS=0
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8004", "--workers", "1"]

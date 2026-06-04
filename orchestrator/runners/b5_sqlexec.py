@@ -42,19 +42,27 @@ class B5Runner(Runner):
     async def warmup(self, cfg: Config) -> None:
         # dbgen for SF=1 takes ~30s on a 4xlarge. Be generous.
         url = f"{cfg.b5_worker_url}/healthz"
+        last_status: str = "no response yet"
         async with httpx.AsyncClient(timeout=10.0) as c:
             for _ in range(180):
                 try:
                     r = await c.get(url)
+                    last_status = f"HTTP {r.status_code}: {r.text[:200]}"
                     if r.status_code == 200 and r.json().get("ok"):
                         info = await c.get(f"{cfg.b5_worker_url}/info")
                         if info.status_code == 200:
                             log.info("b5 ready: %s", info.json())
                         return
-                except Exception:
-                    pass
+                except Exception as e:
+                    last_status = f"connect error: {e!r}"
                 await asyncio.sleep(1)
-        raise RuntimeError("b5 sql-runner did not become ready")
+        raise RuntimeError(
+            f"b5 sql-runner did not become ready after 180s; "
+            f"last response: {last_status}. "
+            f"Tip: `docker logs arl-b5-runner` to see worker startup; "
+            f"common cause is `INSTALL tpch` blocked by network policy. "
+            f"Rebuilding the image bakes the extension at build time."
+        )
 
     async def run_one(self, cfg: Config, instance: dict, concurrency: int) -> BenchmarkResult:
         sink = LatencySink()

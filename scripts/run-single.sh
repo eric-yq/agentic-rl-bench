@@ -18,7 +18,7 @@ fi
 # shellcheck disable=SC1091
 source scripts/_lib.sh
 
-BID="${1:?usage: run-single.sh <B1|B3|B4|B5|B8>}"
+BID="${1:?usage: run-single.sh <B1|B3|B4|B5|B7|B8|B9>}"
 PROFILE="$(echo "${BID}" | tr '[:upper:]' '[:lower:]')"
 
 # Map benchmark -> compose services it needs (besides the orchestrator).
@@ -27,7 +27,9 @@ case "${BID}" in
   B3) WORKERS=(b3-mock-api) ;;
   B4) WORKERS=(b4-webarena-static b4-playwright-worker) ;;
   B5) WORKERS=(b5-sql-runner) ;;
+  B7) WORKERS=(b7-textgame) ;;
   B8) WORKERS=() ;;  # only needs docker socket; no long-running workers
+  B9) WORKERS=(b1-codeexec-worker b3-mock-api b5-sql-runner) ;;
   *)  echo "unknown benchmark id: ${BID}"; exit 2 ;;
 esac
 
@@ -49,12 +51,22 @@ if (( ${#WORKERS[@]} > 0 )); then
 fi
 
 mkdir -p results
-SKIP_LIST=$(printf "B1,B3,B4,B5,B8" | sed "s/${BID},*//;s/,${BID}//")
+SKIP_LIST=$(printf "B1,B3,B4,B5,B7,B8,B9" | sed "s/${BID},*//;s/,${BID}//")
 echo "==> running ${BID} (skipping: ${SKIP_LIST})"
 
 rc=0
 SKIP="${SKIP_LIST}" \
   docker compose --profile orchestrator run --rm --no-deps orchestrator || rc=$?
+
+# Dump each worker's last 80 log lines before teardown - this is what
+# you want when warmup failed because the worker didn't get healthy.
+if (( ${#WORKERS[@]} > 0 )) && (( rc != 0 )); then
+  for svc in "${WORKERS[@]}"; do
+    echo "==> last logs from ${svc}:"
+    docker compose --profile "${PROFILE}" logs --tail 80 "${svc}" || true
+    echo
+  done
+fi
 
 if (( ${#WORKERS[@]} > 0 )); then
   docker compose --profile "${PROFILE}" down --remove-orphans
