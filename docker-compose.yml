@@ -132,8 +132,13 @@ services:
     environment:
       <<: *common-env
       TARGET_URL: http://b4-webarena-static:80
-      # MAX_CONTEXTS=0 -> worker auto-detects vCPU count.
+      # Per-uvicorn-worker context cap. Total in-flight contexts =
+      # B4_UVICORN_WORKERS * MAX_CONTEXTS.
       MAX_CONTEXTS: "${B4_MAX_CONTEXTS:-0}"
+      # Multi-process Chromium so a single asyncio loop / single IPC
+      # pipe doesn't bottleneck the throughput. auto = vCPU/4 with
+      # 1-16 floor/ceiling.
+      B4_UVICORN_WORKERS: "${B4_UVICORN_WORKERS:-auto}"
     shm_size: "2gb"
     ipc: host
     cap_add:

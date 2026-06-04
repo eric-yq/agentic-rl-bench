@@ -1,14 +1,23 @@
 """B4 worker - Playwright headless Chromium service.
 
-One persistent browser, per-request fresh BrowserContext (isolated
-cookies/storage). Each request replays a step list and reports per-
-step success so the orchestrator can compute a selector miss rate.
+Multi-process model: each uvicorn worker owns its own Chromium
+browser instance, isolating it from the others. Within a worker,
+each request gets a fresh BrowserContext (cookies / storage isolated).
 
-`MAX_CONTEXTS` defaults to 2x the container vCPU count. BrowserContexts
-are lightweight (~30MB, no renderer process); the 1x heuristic exactly
-matches the benchmark's typical concurrency sweep (c=16 on 4xlarge),
-creating a hard semaphore cliff at that point. 2x leaves headroom so
-c=32 / c=64 measurements actually exercise queueing under load.
+Why multi-process? A single Chromium IPC pipe + a single asyncio
+event loop becomes the throughput ceiling well before we saturate
+the host's CPU. Splitting Chromium across N worker processes lets
+N event loops run on N cores in parallel, multiplying real CPU
+utilisation from ~1 core to ~N cores. The trade-off is RAM:
+each worker boots its own Chromium master (~150MB) plus renderer
+processes per active context.
+
+Knobs (env):
+  - B4_UVICORN_WORKERS  : how many uvicorn processes (= chromium
+                          masters). Auto-scaled by the launch script
+                          to vCPU / 4 (with floors / ceilings).
+  - MAX_CONTEXTS        : per-process BrowserContext concurrency cap.
+                          Total in-flight contexts = WORKERS * MAX_CONTEXTS.
 """
 
 from __future__ import annotations
@@ -25,12 +34,19 @@ from pydantic import BaseModel
 
 
 def _default_max_contexts() -> int:
-    """2x vCPU available to the container."""
-    try:
-        # Match docker --cpus / cgroup quota (e.g. compose `cpus: 16`).
-        return max(8, 2 * len(os.sched_getaffinity(0)))
-    except Exception:
-        return max(8, 2 * (os.cpu_count() or 8))
+    """Default per-uvicorn-worker context cap.
+
+    Each uvicorn worker process owns its own Chromium browser; total
+    in-flight contexts = WORKERS * MAX_CONTEXTS. We pick 8 here because
+    the launch script defaults WORKERS to ~vCPU/4, so vCPU/4 * 8 = 2x
+    vCPU total contexts - the same target as the prior single-worker
+    config, but now spread across multiple Chromium master processes
+    so the asyncio event loop is not a serial chokepoint.
+
+    Override with MAX_CONTEXTS env to cap (e.g. for cross-arch fairness
+    or memory-constrained instances).
+    """
+    return 8
 
 
 MAX_CONTEXTS = int(os.getenv("MAX_CONTEXTS", "0")) or _default_max_contexts()
