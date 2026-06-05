@@ -22,27 +22,27 @@ EXPOSE 8004
 # Set to a fixed integer to cap (e.g. for fairness across archs).
 ENV MAX_CONTEXTS=0
 
-# Multi-process uvicorn so a single asyncio event loop / single
+# Multi-process Chromium so a single asyncio event loop / single
 # Chromium IPC pipe doesn't bottleneck throughput. Each worker
-# process owns its own browser + its own MAX_CONTEXTS quota, so
-# total in-flight contexts = WORKERS * MAX_CONTEXTS.
+# process owns its own browser + a pre-created context pool of
+# MAX_CONTEXTS slots, so total in-flight contexts =
+# WORKERS * MAX_CONTEXTS but the renderer process count is FIXED
+# at startup (no fork storm under load).
 #
-# We keep WORKERS modest (default 4) because each worker spawns
-# its own Chromium master + child renderers, costing ~150MB +
-# ~30MB per active context. On a 4xlarge 16 GB host, 4 workers
-# x 8 contexts = ~32 in-flight contexts at <2GB resident is a
-# safe sweet spot. Override B4_UVICORN_WORKERS to scale up on
-# bigger instances.
+# Auto-scaling targets ~vCPU/2 workers so each Chromium master gets
+# its own core: on 4xlarge -> 8 workers x 4 ctx = 32 contexts;
+# on 16xlarge -> 32 workers x 4 ctx = 128 contexts; etc.
 ENV B4_UVICORN_WORKERS=auto
 
 CMD ["sh", "-c", "\
   if [ \"${B4_UVICORN_WORKERS}\" = auto ]; then \
     NPROC=$(nproc); \
-    if [ \"${NPROC}\" -lt 4 ]; then W=1; \
-    elif [ \"${NPROC}\" -lt 16 ]; then W=2; \
-    elif [ \"${NPROC}\" -lt 32 ]; then W=4; \
-    elif [ \"${NPROC}\" -lt 64 ]; then W=8; \
-    else W=16; fi; \
+    if [ \"${NPROC}\" -lt 4 ]; then W=2; \
+    elif [ \"${NPROC}\" -lt 8 ]; then W=4; \
+    elif [ \"${NPROC}\" -lt 16 ]; then W=6; \
+    elif [ \"${NPROC}\" -lt 32 ]; then W=8; \
+    elif [ \"${NPROC}\" -lt 64 ]; then W=16; \
+    else W=32; fi; \
   else \
     W=${B4_UVICORN_WORKERS}; \
   fi; \

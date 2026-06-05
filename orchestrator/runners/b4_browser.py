@@ -36,16 +36,25 @@ class B4Runner(Runner):
         )
 
     async def warmup(self, cfg: Config) -> None:
+        # Pool pre-create can take 10-30s on first start: WORKERS *
+        # MAX_CONTEXTS chromium contexts spin up sequentially in each
+        # worker. Be patient.
+        url = f"{cfg.b4_worker_url}/healthz"
+        last = "no response"
         async with httpx.AsyncClient(timeout=5.0) as c:
-            for _ in range(60):
+            for _ in range(180):
                 try:
-                    r = await c.get(f"{cfg.b4_worker_url}/healthz")
+                    r = await c.get(url)
+                    last = f"HTTP {r.status_code}: {r.text[:200]}"
                     if r.status_code == 200 and r.json().get("ok"):
                         return
-                except Exception:
-                    pass
+                except Exception as e:
+                    last = f"connect error: {e!r}"
                 await asyncio.sleep(1)
-        raise RuntimeError("b4 playwright worker did not become ready")
+        raise RuntimeError(
+            f"b4 playwright worker did not become ready after 180s; "
+            f"last response: {last}"
+        )
 
     async def run_one(self, cfg: Config, instance: dict, concurrency: int) -> BenchmarkResult:
         sink = LatencySink()

@@ -1,23 +1,29 @@
 """B4 worker - Playwright headless Chromium service.
 
-Multi-process model: each uvicorn worker owns its own Chromium
-browser instance, isolating it from the others. Within a worker,
-each request gets a fresh BrowserContext (cookies / storage isolated).
+Multi-process + context-pool model:
+  - Each uvicorn worker process owns its own Chromium browser.
+  - Within a worker, we pre-create a pool of `MAX_CONTEXTS`
+    long-lived BrowserContexts at startup. Per-request we borrow
+    one, run the trajectory, then `clear_cookies()` + navigate
+    back to `about:blank` before returning it.
 
-Why multi-process? A single Chromium IPC pipe + a single asyncio
-event loop becomes the throughput ceiling well before we saturate
-the host's CPU. Splitting Chromium across N worker processes lets
-N event loops run on N cores in parallel, multiplying real CPU
-utilisation from ~1 core to ~N cores. The trade-off is RAM:
-each worker boots its own Chromium master (~150MB) plus renderer
-processes per active context.
+Why pool instead of per-request context? Creating + tearing down a
+BrowserContext spawns / kills a Chromium renderer process on every
+request. At c=128 that's hundreds of fork()/wait() cycles per
+second; aarch64 kernels in particular bottleneck on this fork
+storm long before any V8 / Skia work is done. Pooling keeps the
+renderer set fixed at WORKERS * MAX_CONTEXTS, so CPU utilisation
+scales with concurrency instead of choking on fork overhead.
 
 Knobs (env):
   - B4_UVICORN_WORKERS  : how many uvicorn processes (= chromium
-                          masters). Auto-scaled by the launch script
-                          to vCPU / 4 (with floors / ceilings).
-  - MAX_CONTEXTS        : per-process BrowserContext concurrency cap.
-                          Total in-flight contexts = WORKERS * MAX_CONTEXTS.
+                          masters). Auto-scaled by the launch script.
+  - MAX_CONTEXTS        : per-process pool size (= renderer count
+                          per Chromium master). Total in-flight
+                          contexts = WORKERS * MAX_CONTEXTS.
+  - ACTION_TIMEOUT_MS   : per-action timeout for click / fill. Small
+                          value (default 500ms) so a missed selector
+                          fails fast instead of dominating wall time.
 """
 
 from __future__ import annotations
@@ -29,37 +35,68 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from playwright.async_api import async_playwright, Browser
+from playwright.async_api import (
+    async_playwright,
+    Browser,
+    BrowserContext,
+    Page,
+)
 from pydantic import BaseModel
 
 
 def _default_max_contexts() -> int:
-    """Default per-uvicorn-worker context cap.
+    """Per-uvicorn-worker context-pool size.
 
-    Each uvicorn worker process owns its own Chromium browser; total
-    in-flight contexts = WORKERS * MAX_CONTEXTS. We pick 8 here because
-    the launch script defaults WORKERS to ~vCPU/4, so vCPU/4 * 8 = 2x
-    vCPU total contexts - the same target as the prior single-worker
-    config, but now spread across multiple Chromium master processes
-    so the asyncio event loop is not a serial chokepoint.
-
-    Override with MAX_CONTEXTS env to cap (e.g. for cross-arch fairness
-    or memory-constrained instances).
+    Each pool slot holds an active Chromium renderer process, so the
+    number wants to be modest. We default to 4: the launch script
+    sets WORKERS to ~vCPU/2, giving WORKERS * MAX_CONTEXTS = 2*vCPU
+    total in-flight contexts (matches our typical concurrency target).
     """
-    return 8
+    return 4
 
 
 MAX_CONTEXTS = int(os.getenv("MAX_CONTEXTS", "0")) or _default_max_contexts()
-ACTION_TIMEOUT_MS = int(os.getenv("ACTION_TIMEOUT_MS", "2000"))
+ACTION_TIMEOUT_MS = int(os.getenv("ACTION_TIMEOUT_MS", "500"))
+GOTO_TIMEOUT_MS = int(os.getenv("GOTO_TIMEOUT_MS", "5000"))
 
 _browser: Browser | None = None
 _pw = None
-_sem = asyncio.Semaphore(MAX_CONTEXTS)
+# Async queue acts both as the pool and as a bounded semaphore: a
+# request can only run when it can `get()` a context, and `put()`
+# returns it. No separate Semaphore needed.
+_pool: asyncio.Queue[tuple[BrowserContext, Page]] | None = None
+
+
+async def _make_slot(browser: Browser) -> tuple[BrowserContext, Page]:
+    ctx = await browser.new_context(viewport={"width": 1280, "height": 800})
+    page = await ctx.new_page()
+    return ctx, page
+
+
+async def _reset_slot(ctx: BrowserContext, page: Page) -> tuple[BrowserContext, Page]:
+    """Clear per-trajectory state so the slot looks fresh next time.
+
+    On error we drop the slot and create a new one (Chromium pages can
+    end up wedged after navigation timeouts; better to recycle).
+    """
+    try:
+        await ctx.clear_cookies()
+        await page.goto("about:blank", wait_until="domcontentloaded",
+                        timeout=GOTO_TIMEOUT_MS)
+        return ctx, page
+    except Exception:
+        try:
+            await ctx.close()
+        except Exception:
+            pass
+        if _browser is None:
+            raise
+        return await _make_slot(_browser)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _browser, _pw
+    global _browser, _pw, _pool
     _pw = await async_playwright().start()
     _browser = await _pw.chromium.launch(
         headless=True,
@@ -68,9 +105,31 @@ async def lifespan(app: FastAPI):
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--disable-features=IsolateOrigins,site-per-process",
+            # Skia / GPU compositing off so we don't accidentally
+            # depend on hardware accel that's missing in containers.
+            "--disable-software-rasterizer",
         ],
     )
+    print(f"[b4] worker pid={os.getpid()} pool={MAX_CONTEXTS} "
+          f"action_timeout={ACTION_TIMEOUT_MS}ms", flush=True)
+
+    _pool = asyncio.Queue(maxsize=MAX_CONTEXTS)
+    # Pre-create all slots up front so the first burst doesn't pay
+    # the renderer-start tax.
+    for _ in range(MAX_CONTEXTS):
+        slot = await _make_slot(_browser)
+        await _pool.put(slot)
+    print(f"[b4] worker pid={os.getpid()} pool ready", flush=True)
+
     yield
+
+    # Drain the pool on shutdown.
+    while not _pool.empty():
+        ctx, _page = _pool.get_nowait()
+        try:
+            await ctx.close()
+        except Exception:
+            pass
     await _browser.close()
     await _pw.stop()
 
@@ -97,55 +156,71 @@ class TaskResponse(BaseModel):
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    return {"ok": _browser is not None}
+    pool_size = _pool.qsize() if _pool is not None else 0
+    return {"ok": _browser is not None and _pool is not None,
+            "pool_idle": pool_size,
+            "pool_max": MAX_CONTEXTS}
 
 
 @app.post("/task", response_model=TaskResponse)
 async def task(req: TaskRequest) -> TaskResponse:
-    if _browser is None:
+    if _browser is None or _pool is None:
         raise HTTPException(503, "browser not ready")
     t0 = time.perf_counter()
     done = 0
     failed = 0
-    async with _sem:
-        ctx = await _browser.new_context(viewport={"width": 1280, "height": 800})
+
+    ctx, page = await _pool.get()
+    try:
+        for step in req.steps:
+            a = step.action
+            args = step.args
+            try:
+                if a == "goto":
+                    path = args.get("path", "/")
+                    await page.goto(req.target_url + path,
+                                    wait_until="domcontentloaded",
+                                    timeout=GOTO_TIMEOUT_MS)
+                elif a == "click":
+                    sel = args.get("selector")
+                    await page.click(sel, timeout=ACTION_TIMEOUT_MS)
+                elif a == "scroll":
+                    await page.evaluate(
+                        f"window.scrollBy(0, {int(args.get('y', 400))})"
+                    )
+                elif a == "type":
+                    sel = args.get("selector", "input")
+                    text = args.get("text", "")
+                    await page.fill(sel, text, timeout=ACTION_TIMEOUT_MS)
+                elif a == "screenshot":
+                    # Synthetic encode benchmark - keep PNG so Skia
+                    # actually compresses (vs JPEG which is ~free).
+                    await page.screenshot(full_page=False, type="png")
+                else:
+                    raise HTTPException(400, f"unknown action: {a}")
+                done += 1
+            except HTTPException:
+                raise
+            except Exception:
+                # Selector misses / per-action timeouts: count + move on.
+                failed += 1
+    finally:
+        # Reset and return to pool. _reset_slot recreates on error so
+        # we don't shrink the pool.
         try:
-            page = await ctx.new_page()
-            for step in req.steps:
-                a = step.action
-                args = step.args
-                try:
-                    if a == "goto":
-                        path = args.get("path", "/")
-                        await page.goto(req.target_url + path,
-                                        wait_until="domcontentloaded",
-                                        timeout=10_000)
-                    elif a == "click":
-                        sel = args.get("selector")
-                        await page.click(sel, timeout=ACTION_TIMEOUT_MS)
-                    elif a == "scroll":
-                        await page.evaluate(
-                            f"window.scrollBy(0, {int(args.get('y', 400))})"
-                        )
-                    elif a == "type":
-                        sel = args.get("selector", "input")
-                        text = args.get("text", "")
-                        await page.fill(sel, text, timeout=ACTION_TIMEOUT_MS)
-                    elif a == "screenshot":
-                        # Synthetic encode benchmark - keep PNG so Skia
-                        # actually compresses (vs JPEG which is ~free).
-                        await page.screenshot(full_page=False, type="png")
-                    else:
-                        raise HTTPException(400, f"unknown action: {a}")
-                    done += 1
-                except HTTPException:
-                    raise
-                except Exception:
-                    # Selector misses, fill timeouts: real LLM agents
-                    # also miss occasionally; record but don't abort.
-                    failed += 1
-        finally:
-            await ctx.close()
+            ctx, page = await _reset_slot(ctx, page)
+        except Exception:
+            # Last-resort: if even slot recreation fails, close the
+            # broken context and let the pool size shrink. The pool
+            # will eventually refill via successful resets.
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+            ctx = page = None  # type: ignore
+        if ctx is not None:
+            await _pool.put((ctx, page))
+
     return TaskResponse(
         wall_ms=(time.perf_counter() - t0) * 1000.0,
         steps_done=done,
