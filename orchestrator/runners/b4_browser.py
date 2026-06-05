@@ -34,6 +34,8 @@ class B4Runner(Runner):
         self._trajectories, self._breakdown = build_trajectories(
             target_total=80, seed=42,
         )
+        # Populated by warmup() via /ports discovery.
+        self._worker_ports: list[int] = []
 
     async def warmup(self, cfg: Config) -> None:
         # Pool pre-create can take 10-30s on first start: WORKERS *
@@ -47,6 +49,16 @@ class B4Runner(Runner):
                     r = await c.get(url)
                     last = f"HTTP {r.status_code}: {r.text[:200]}"
                     if r.status_code == 200 and r.json().get("ok"):
+                        # Discover the full set of worker ports for
+                        # client-side round-robin (bypasses unbalanced
+                        # kernel SO_REUSEPORT hashing).
+                        try:
+                            pr = await c.get(f"{cfg.b4_worker_url}/ports")
+                            self._worker_ports = pr.json().get("ports", [])
+                            log.info("[B4] discovered worker ports: %s",
+                                     self._worker_ports)
+                        except Exception:
+                            self._worker_ports = []
                         return
                 except Exception as e:
                     last = f"connect error: {e!r}"
@@ -63,14 +75,25 @@ class B4Runner(Runner):
         _reset_task = schedule_sampler_reset(sampler, cfg.warmup_sec, self.name)
 
         url = f"{cfg.b4_worker_url}/task"
+        # Build the per-port URL list for client-side round-robin.
+        # If discovery failed (legacy worker), fall back to the
+        # single-URL behaviour (subject to kernel SO_REUSEPORT).
+        if self._worker_ports:
+            host = cfg.b4_worker_url.split("://", 1)[-1].split(":", 1)[0]
+            scheme = "http"
+            urls = [f"{scheme}://{host}:{p}/task" for p in self._worker_ports]
+        else:
+            urls = [url]
+        log.info("[B4] dispatching to %d worker URL(s)", len(urls))
+
         # Browser context creation is heavy; allow generous per-task budget.
         #
         # Disable HTTP keep-alive so each request opens a fresh TCP
-        # connection. This forces the kernel's SO_REUSEPORT to load-
-        # balance across uvicorn worker PIDs every request, instead of
-        # letting one keep-alive connection pin to a single worker for
-        # its lifetime - which we observed causing 2-3s slot-queue
-        # spikes on aarch64 (one worker booked solid, others idle).
+        # connection. Combined with explicit per-port round-robin
+        # below, this guarantees even fanout across all worker
+        # processes - bypassing the kernel's SO_REUSEPORT hash which
+        # we measured as severely unbalanced on aarch64 (one PID at
+        # 35% of requests, another at 1%).
         client = httpx.AsyncClient(
             timeout=180.0,
             limits=httpx.Limits(
@@ -105,8 +128,12 @@ class B4Runner(Runner):
                 ],
             }
 
+            # Strict round-robin across worker ports - guarantees
+            # exactly equal load across Chromium masters regardless
+            # of kernel scheduling behaviour.
+            target_url = urls[i % len(urls)]
             t0 = time.perf_counter()
-            r = await client.post(url, json=payload)
+            r = await client.post(target_url, json=payload)
             r.raise_for_status()
             data = r.json()
             totals["actions"]      += data.get("actions", 0)

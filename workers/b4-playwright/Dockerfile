@@ -17,31 +17,42 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY app.py /app/app.py
 
-EXPOSE 8004
-# MAX_CONTEXTS=0 (or unset) -> auto = 2x container vCPU.
+# We listen on B4_PORT_BASE..B4_PORT_BASE+N-1; on a user-defined
+# docker network all container ports are reachable peer-to-peer
+# without an EXPOSE / publish step.
+
+# MAX_CONTEXTS=0 (or unset) -> auto = 4 contexts per worker process.
 # Set to a fixed integer to cap (e.g. for fairness across archs).
 ENV MAX_CONTEXTS=0
 
-# Multi-process Chromium with a generous pool per worker. Each
-# uvicorn worker process owns its own Chromium master + a pre-
-# created pool of MAX_CONTEXTS BrowserContexts.
+# One uvicorn process per port (no SO_REUSEPORT). The client picks a
+# port deterministically per request, so load is exactly even across
+# Chromium masters - measured aarch64 SO_REUSEPORT can pile 35% of
+# requests on one PID and starve others to 1%, which cripples c8g
+# even though chromium itself is faster than on c7i.
 #
-# Sizing rationale (verified by `B4_TRACE=1` measurements on c=32):
-#   - WORKERS must stay <= vCPU/2. Each master takes a real CPU
-#     and competes with renderer threads; oversubscribing makes the
-#     scheduler thrash and CPU% drops by 4-5x.
-#   - MAX_CONTEXTS = 16 absorbs the worst-case SO_REUSEPORT hash
-#     imbalance. Even when the kernel hashes ALL 16 of the 32 client
-#     connections onto a single worker, that worker has 16 slots so
-#     no queueing occurs (pool_wait approx 0).
-#   - Total slots = WORKERS * 16.
+# Sizing rationale (verified by `B4_TRACE=1` measurements):
+#   - WORKERS = vCPU/2. Each Chromium master needs a real CPU and
+#     competes with renderer threads; oversubscribing thrashes the
+#     scheduler and CPU% drops by 4-5x.
+#   - MAX_CONTEXTS = 4. With client-side strict round-robin, c=32
+#     spreads exactly 4 connections to each of 8 workers - perfect
+#     fit, no queueing. Higher c overflows into the pool queue but
+#     Chromium stays busy.
+#   - Total ACTIVE Chromium renderer processes at c=32: 8 masters +
+#     32 renderers = 40. (Compare: 16 ctx/worker would be 128 procs
+#     on 16 vCPU, scheduler thrash.)
 #
 # Auto-scaling:
-#   4xlarge   (16 vCPU): 8 workers x 16 ctx = 128 total slots
-#   16xlarge  (64 vCPU): 32 workers x 16 ctx = 512 total slots
-#   24xlarge  (96 vCPU): 48 workers x 16 ctx = 768 total slots
+#   4xlarge   (16 vCPU): 8 workers x 4 ctx = 32 total slots
+#   16xlarge  (64 vCPU): 32 workers x 4 ctx = 128 total slots
+#   24xlarge  (96 vCPU): 48 workers x 4 ctx = 192 total slots
 ENV B4_UVICORN_WORKERS=auto
+ENV B4_PORT_BASE=8004
 
+# Launch one independent uvicorn process per port. We `&` each into
+# the background, then `wait` so the container stays alive as long
+# as any worker does (and exits if all die).
 CMD ["sh", "-c", "\
   if [ \"${B4_UVICORN_WORKERS}\" = auto ]; then \
     NPROC=$(nproc); \
@@ -50,5 +61,13 @@ CMD ["sh", "-c", "\
   else \
     W=${B4_UVICORN_WORKERS}; \
   fi; \
-  echo \"[b4] starting uvicorn with ${W} workers (MAX_CONTEXTS=${MAX_CONTEXTS} per worker)\"; \
-  exec uvicorn app:app --host 0.0.0.0 --port 8004 --workers ${W}"]
+  echo \"[b4] launching ${W} single-process workers on ports ${B4_PORT_BASE}..\"; \
+  export B4_NUM_PORTS=${W}; \
+  i=0; \
+  while [ ${i} -lt ${W} ]; do \
+    port=$((B4_PORT_BASE + i)); \
+    echo \"[b4] starting uvicorn on :${port}\"; \
+    uvicorn app:app --host 0.0.0.0 --port ${port} --workers 1 & \
+    i=$((i + 1)); \
+  done; \
+  wait"]

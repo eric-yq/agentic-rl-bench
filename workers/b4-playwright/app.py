@@ -47,23 +47,30 @@ from pydantic import BaseModel
 def _default_max_contexts() -> int:
     """Per-uvicorn-worker context-pool size.
 
-    Default to 16 so each worker can absorb large SO_REUSEPORT TCP
-    accept imbalances. Empirically aarch64 kernel hashes 32 client
-    connections into 8 workers more unevenly than amd64 does (53%
-    vs 23% trajectories see pool_wait>0 with MAX_CONTEXTS=8); 16
-    slots is large enough that even a worker hashed all 16 of the
-    32 client connections doesn't queue.
+    Default to 4. With client-side round-robin guaranteeing exactly
+    `concurrency / WORKERS` connections per worker, a pool of 4 is
+    enough for the standard c=32 sweep on a 4xlarge (8 workers x 4
+    slots = 32 slots, perfectly matched). Higher concurrency (c=64,
+    c=128) intentionally spills into the pool's queue - pool_wait
+    rises but Chromium stays busy and CPU utilisation tracks load.
 
-    Total slots = WORKERS * MAX_CONTEXTS = 8 * 16 = 128 on a 4xlarge.
-    Memory budget: 8 chromium masters x 150MB + 128 contexts x ~30MB
-    renderer = ~5GB; well within a 4xlarge's 32GB.
+    Sizing too high is harmful: 16 contexts/worker x 8 workers = 128
+    Chromium renderer processes on 16 vCPU thrashes the kernel
+    scheduler and page-table walks (we measured CPU drop ~30% from
+    over-subscription on aarch64).
     """
-    return 16
+    return 4
 
 
 MAX_CONTEXTS = int(os.getenv("MAX_CONTEXTS", "0")) or _default_max_contexts()
 ACTION_TIMEOUT_MS = int(os.getenv("ACTION_TIMEOUT_MS", "500"))
 GOTO_TIMEOUT_MS = int(os.getenv("GOTO_TIMEOUT_MS", "5000"))
+
+# When the launcher starts N independent uvicorn processes on
+# adjacent ports starting at B4_PORT_BASE, this lets clients fetch
+# the full list from any single instance and round-robin themselves.
+PORT_BASE = int(os.getenv("B4_PORT_BASE", "8004"))
+NUM_PORTS = int(os.getenv("B4_NUM_PORTS", "0"))  # set by launcher
 
 _browser: Browser | None = None
 _pw = None
@@ -165,7 +172,23 @@ async def healthz() -> dict:
     pool_size = _pool.qsize() if _pool is not None else 0
     return {"ok": _browser is not None and _pool is not None,
             "pool_idle": pool_size,
-            "pool_max": MAX_CONTEXTS}
+            "pool_max": MAX_CONTEXTS,
+            "pid": os.getpid(),
+            "port_base": PORT_BASE,
+            "num_ports": NUM_PORTS}
+
+
+@app.get("/ports")
+async def ports() -> dict:
+    """List all worker ports the launcher started.
+
+    Clients use this to discover the full set, then round-robin
+    across them - bypassing the kernel's SO_REUSEPORT hash which
+    is severely unbalanced on aarch64 with single-source-IP
+    short-lived connections.
+    """
+    n = NUM_PORTS or 1
+    return {"ports": [PORT_BASE + i for i in range(n)]}
 
 
 @app.post("/task", response_model=TaskResponse)
