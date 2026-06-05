@@ -64,7 +64,12 @@ def _default_max_contexts() -> int:
 
 MAX_CONTEXTS = int(os.getenv("MAX_CONTEXTS", "0")) or _default_max_contexts()
 ACTION_TIMEOUT_MS = int(os.getenv("ACTION_TIMEOUT_MS", "500"))
-GOTO_TIMEOUT_MS = int(os.getenv("GOTO_TIMEOUT_MS", "5000"))
+# Goto timeout: must absorb worst-case Chromium IPC queueing at high
+# concurrency. At c=128 with 4 slots/worker we get ~16 client
+# connections per master, so a fresh goto can wait up to ~3-4
+# trajectories' time before its own work starts. 10s gives 2x
+# margin without masking real navigation hangs.
+GOTO_TIMEOUT_MS = int(os.getenv("GOTO_TIMEOUT_MS", "10000"))
 
 # When the launcher starts N independent uvicorn processes on
 # adjacent ports starting at B4_PORT_BASE, this lets clients fetch
