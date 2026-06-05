@@ -26,20 +26,20 @@ ENV MAX_CONTEXTS=0
 # uvicorn worker process owns its own Chromium master + a pre-
 # created pool of MAX_CONTEXTS BrowserContexts.
 #
-# Sizing rationale (verified by `B4_TRACE=1` measurements):
+# Sizing rationale (verified by `B4_TRACE=1` measurements on c=32):
 #   - WORKERS must stay <= vCPU/2. Each master takes a real CPU
 #     and competes with renderer threads; oversubscribing makes the
 #     scheduler thrash and CPU% drops by 4-5x.
-#   - MAX_CONTEXTS = 8 absorbs SO_REUSEPORT TCP accept imbalance.
-#     Even when the kernel hashes half of all client connections
-#     onto one worker, that worker has 8 slots available so
-#     pool_wait stays under 1s.
-#   - Total slots = WORKERS * 8.
+#   - MAX_CONTEXTS = 16 absorbs the worst-case SO_REUSEPORT hash
+#     imbalance. Even when the kernel hashes ALL 16 of the 32 client
+#     connections onto a single worker, that worker has 16 slots so
+#     no queueing occurs (pool_wait approx 0).
+#   - Total slots = WORKERS * 16.
 #
 # Auto-scaling:
-#   4xlarge   (16 vCPU): 8 workers x 8 ctx = 64 total slots
-#   16xlarge  (64 vCPU): 32 workers x 8 ctx = 256 total slots
-#   24xlarge  (96 vCPU): 48 workers x 8 ctx = 384 total slots
+#   4xlarge   (16 vCPU): 8 workers x 16 ctx = 128 total slots
+#   16xlarge  (64 vCPU): 32 workers x 16 ctx = 512 total slots
+#   24xlarge  (96 vCPU): 48 workers x 16 ctx = 768 total slots
 ENV B4_UVICORN_WORKERS=auto
 
 CMD ["sh", "-c", "\

@@ -47,18 +47,18 @@ from pydantic import BaseModel
 def _default_max_contexts() -> int:
     """Per-uvicorn-worker context-pool size.
 
-    Default to 8 so each worker can absorb load imbalance from the
-    kernel's SO_REUSEPORT TCP accept distribution. With WORKERS =
-    vCPU/2 = 8 on a 4xlarge, total slots = 64; for a c=32 sweep that
-    means even a worst-case hash that piles 16 connections onto one
-    worker still has half its slots free, keeping pool_wait < 1s.
+    Default to 16 so each worker can absorb large SO_REUSEPORT TCP
+    accept imbalances. Empirically aarch64 kernel hashes 32 client
+    connections into 8 workers more unevenly than amd64 does (53%
+    vs 23% trajectories see pool_wait>0 with MAX_CONTEXTS=8); 16
+    slots is large enough that even a worker hashed all 16 of the
+    32 client connections doesn't queue.
 
-    Chromium master process count = WORKERS, NOT WORKERS * MAX_CONTEXTS;
-    the master fans out to lightweight renderer processes per active
-    context, but renderers are mostly IPC-blocked so total active
-    CPU is bounded by master count. WORKERS must stay <= vCPU.
+    Total slots = WORKERS * MAX_CONTEXTS = 8 * 16 = 128 on a 4xlarge.
+    Memory budget: 8 chromium masters x 150MB + 128 contexts x ~30MB
+    renderer = ~5GB; well within a 4xlarge's 32GB.
     """
-    return 8
+    return 16
 
 
 MAX_CONTEXTS = int(os.getenv("MAX_CONTEXTS", "0")) or _default_max_contexts()
@@ -184,6 +184,8 @@ async def task(req: TaskRequest) -> TaskResponse:
     pool_wait_t0 = time.perf_counter()
     ctx, page = await _pool.get()
     pool_wait_ms = (time.perf_counter() - pool_wait_t0) * 1000.0
+    # Pool occupancy at the moment we acquired (idle slots after our get).
+    pool_idle_after_get = _pool.qsize()
 
     action_times: list[tuple[str, float]] = []
     try:
@@ -250,7 +252,15 @@ async def task(req: TaskRequest) -> TaskResponse:
         summary = " ".join(
             f"{k}={sum(v):.0f}ms/{len(v)}" for k, v in per_kind.items()
         )
-        print(f"[b4-trace] wall={wall_ms:.0f}ms pool_wait={pool_wait_ms:.0f}ms "
+        # Tag every trace line with the worker PID and the pool occupancy
+        # observed right after acquiring a slot. This lets the operator
+        # see, post-hoc, whether the kernel's SO_REUSEPORT is fanning
+        # incoming connections evenly across worker processes - if a few
+        # PIDs dominate the trace, load is imbalanced and bumping
+        # MAX_CONTEXTS won't help; we'd need client-side worker-port
+        # round-robin instead.
+        print(f"[b4-trace] pid={os.getpid()} pool_idle={pool_idle_after_get}/{MAX_CONTEXTS} "
+              f"wall={wall_ms:.0f}ms pool_wait={pool_wait_ms:.0f}ms "
               f"done={done} failed={failed} {summary}",
               flush=True)
 
