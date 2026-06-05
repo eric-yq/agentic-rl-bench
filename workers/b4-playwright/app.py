@@ -47,12 +47,20 @@ from pydantic import BaseModel
 def _default_max_contexts() -> int:
     """Per-uvicorn-worker context-pool size.
 
-    Each pool slot holds an active Chromium renderer process, so the
-    number wants to be modest. We default to 4: the launch script
-    sets WORKERS to ~vCPU/2, giving WORKERS * MAX_CONTEXTS = 2*vCPU
-    total in-flight contexts (matches our typical concurrency target).
+    Default to 1: each uvicorn worker holds exactly one BrowserContext,
+    eliminating the in-process semaphore queue. This is the simpler
+    "prefork" model - SO_REUSEPORT distributes incoming connections
+    across N single-slot workers and the kernel naturally serialises
+    requests at the TCP accept layer.
+
+    Why not multi-slot per worker? Empirically the multi-slot pool
+    suffers from severe imbalance under aarch64 + httpx keep-alive
+    (some workers process 4x as many concurrent requests as others,
+    creating multi-second pool_wait spikes that don't appear on x86).
+    With 1 slot per worker the kernel does the load balancing instead
+    of asyncio queues inside one process.
     """
-    return 4
+    return 1
 
 
 MAX_CONTEXTS = int(os.getenv("MAX_CONTEXTS", "0")) or _default_max_contexts()

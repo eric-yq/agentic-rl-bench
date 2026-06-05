@@ -64,9 +64,20 @@ class B4Runner(Runner):
 
         url = f"{cfg.b4_worker_url}/task"
         # Browser context creation is heavy; allow generous per-task budget.
+        #
+        # Disable HTTP keep-alive so each request opens a fresh TCP
+        # connection. This forces the kernel's SO_REUSEPORT to load-
+        # balance across uvicorn worker PIDs every request, instead of
+        # letting one keep-alive connection pin to a single worker for
+        # its lifetime - which we observed causing 2-3s slot-queue
+        # spikes on aarch64 (one worker booked solid, others idle).
         client = httpx.AsyncClient(
             timeout=180.0,
-            limits=httpx.Limits(max_connections=concurrency * 2),
+            limits=httpx.Limits(
+                max_connections=concurrency * 2,
+                max_keepalive_connections=0,
+            ),
+            headers={"Connection": "close"},
         )
 
         master_rng = random.Random(0xB4 ^ concurrency)

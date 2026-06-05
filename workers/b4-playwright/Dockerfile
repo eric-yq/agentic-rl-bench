@@ -22,29 +22,26 @@ EXPOSE 8004
 # Set to a fixed integer to cap (e.g. for fairness across archs).
 ENV MAX_CONTEXTS=0
 
-# Multi-process Chromium so a single asyncio event loop / single
-# Chromium IPC pipe doesn't bottleneck throughput. Each worker
-# process owns its own browser + a pre-created context pool of
-# MAX_CONTEXTS slots, so total in-flight contexts =
-# WORKERS * MAX_CONTEXTS but the renderer process count is FIXED
-# at startup (no fork storm under load).
+# Multi-process Chromium with single-slot workers. Each uvicorn
+# worker process owns its own Chromium master + exactly one
+# BrowserContext (MAX_CONTEXTS=1). The kernel's SO_REUSEPORT
+# accept-balancing distributes load across workers - this is
+# significantly more even on aarch64 than asyncio Semaphore-based
+# pooling inside a single worker process.
 #
-# Auto-scaling targets ~vCPU/2 workers so each Chromium master gets
-# its own core: on 4xlarge -> 8 workers x 4 ctx = 32 contexts;
-# on 16xlarge -> 32 workers x 4 ctx = 128 contexts; etc.
+# Total in-flight contexts = WORKERS (since MAX_CONTEXTS=1).
+# Auto-scaling targets ~2x vCPU workers so a c=2*vCPU sweep saturates
+# without queueing: 4xlarge -> 32 workers, 16xlarge -> 128 workers,
+# 24xlarge -> 192 workers.
 ENV B4_UVICORN_WORKERS=auto
 
 CMD ["sh", "-c", "\
   if [ \"${B4_UVICORN_WORKERS}\" = auto ]; then \
     NPROC=$(nproc); \
-    if [ \"${NPROC}\" -lt 4 ]; then W=2; \
-    elif [ \"${NPROC}\" -lt 8 ]; then W=4; \
-    elif [ \"${NPROC}\" -lt 16 ]; then W=6; \
-    elif [ \"${NPROC}\" -lt 32 ]; then W=8; \
-    elif [ \"${NPROC}\" -lt 64 ]; then W=16; \
-    else W=32; fi; \
+    W=$((NPROC * 2)); \
+    if [ \"${W}\" -lt 8 ]; then W=8; fi; \
   else \
     W=${B4_UVICORN_WORKERS}; \
   fi; \
-  echo \"[b4] starting uvicorn with ${W} workers (MAX_CONTEXTS=${MAX_CONTEXTS} per worker)\"; \
+  echo \"[b4] starting uvicorn with ${W} single-slot workers\"; \
   exec uvicorn app:app --host 0.0.0.0 --port 8004 --workers ${W}"]
