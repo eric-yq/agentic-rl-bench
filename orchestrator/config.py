@@ -55,6 +55,13 @@ class Config:
         default_factory=lambda: _csv_int(os.getenv("B9_CONCURRENCIES", "64,256,1024"))
     )
 
+    # B4 - browser. Chromium renderer fork storms degrade negatively
+    # past ~64 contexts on aarch64 (kernel fork path + page cache
+    # contention). Empty list -> use the global CONCURRENCIES sweep.
+    b4_concurrencies: list[int] = field(
+        default_factory=lambda: _csv_int(os.getenv("B4_CONCURRENCIES", "2,8,16,32,64"))
+    )
+
     # Run control
     skip: list[str] = field(default_factory=lambda: _csv_str(os.getenv("SKIP", "")))
 

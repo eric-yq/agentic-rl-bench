@@ -94,12 +94,19 @@ async def run_benchmark(
 
     # Per-benchmark concurrency / duration overrides. B9 in particular
     # ramps 64 -> 256 -> 1024 over 30min, distinct from the per-bench
-    # sweep used by B1/B3/B4/B5.
+    # sweep used by B1/B3/B5.
+    # B4 (browser) caps lower: each in-flight context spawns Chromium
+    # renderer processes, and at c=128+ aarch64 hosts in particular
+    # exhaust kernel fork paths and page-cache headroom, producing
+    # negative scaling. We use a dedicated sweep that stops where the
+    # workload still has signal.
     concurrencies = cfg.concurrencies
     duration = cfg.duration_sec
     if bid == "B9":
         concurrencies = cfg.b9_concurrencies
         duration = cfg.b9_duration_sec
+    elif bid == "B4":
+        concurrencies = cfg.b4_concurrencies or cfg.concurrencies
 
     for c in concurrencies:
         log.info("[%s] concurrency=%d duration=%ds", bid, c, duration)
