@@ -170,11 +170,21 @@ async def task(req: TaskRequest) -> TaskResponse:
     done = 0
     failed = 0
 
+    # Optional per-action timing instrumentation. Set B4_TRACE=1 in the
+    # worker env (compose) and inspect `docker logs arl-b4-worker` to
+    # see where time goes. KEEP OFF in production - even just the time
+    # measurements add ~5us per action.
+    trace = os.getenv("B4_TRACE", "0") == "1"
+    pool_wait_t0 = time.perf_counter()
     ctx, page = await _pool.get()
+    pool_wait_ms = (time.perf_counter() - pool_wait_t0) * 1000.0
+
+    action_times: list[tuple[str, float]] = []
     try:
         for step in req.steps:
             a = step.action
             args = step.args
+            a_t0 = time.perf_counter()
             try:
                 if a == "goto":
                     path = args.get("path", "/")
@@ -204,6 +214,10 @@ async def task(req: TaskRequest) -> TaskResponse:
             except Exception:
                 # Selector misses / per-action timeouts: count + move on.
                 failed += 1
+            if trace:
+                action_times.append(
+                    (a, (time.perf_counter() - a_t0) * 1000.0)
+                )
     finally:
         # Reset and return to pool. _reset_slot recreates on error so
         # we don't shrink the pool.
@@ -221,8 +235,21 @@ async def task(req: TaskRequest) -> TaskResponse:
         if ctx is not None:
             await _pool.put((ctx, page))
 
+    wall_ms = (time.perf_counter() - t0) * 1000.0
+    if trace:
+        # One line per trajectory; histogram by action type.
+        per_kind: dict[str, list[float]] = {}
+        for kind, ms in action_times:
+            per_kind.setdefault(kind, []).append(ms)
+        summary = " ".join(
+            f"{k}={sum(v):.0f}ms/{len(v)}" for k, v in per_kind.items()
+        )
+        print(f"[b4-trace] wall={wall_ms:.0f}ms pool_wait={pool_wait_ms:.0f}ms "
+              f"done={done} failed={failed} {summary}",
+              flush=True)
+
     return TaskResponse(
-        wall_ms=(time.perf_counter() - t0) * 1000.0,
+        wall_ms=wall_ms,
         steps_done=done,
         steps_failed=failed,
         actions=len(req.steps),

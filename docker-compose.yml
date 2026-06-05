@@ -137,9 +137,16 @@ services:
       # B4_UVICORN_WORKERS * MAX_CONTEXTS.
       MAX_CONTEXTS: "${B4_MAX_CONTEXTS:-0}"
       # Multi-process Chromium so a single asyncio loop / single IPC
-      # pipe doesn't bottleneck the throughput. auto = vCPU/4 with
-      # 1-16 floor/ceiling.
+      # pipe doesn't bottleneck the throughput. auto = vCPU/2 with
+      # 2-32 floor/ceiling.
       B4_UVICORN_WORKERS: "${B4_UVICORN_WORKERS:-auto}"
+      # Per-trajectory tracing: set to 1 to log per-action wall ms.
+      # Use only for debugging; ~5us/action overhead.
+      B4_TRACE: "${B4_TRACE:-0}"
+      # Chromium IPC / shm troubleshooting flags. Defaults are off.
+      CHROMIUM_DISABLE_DEV_SHM: "${CHROMIUM_DISABLE_DEV_SHM:-0}"
+      CHROMIUM_NO_ZYGOTE:        "${CHROMIUM_NO_ZYGOTE:-0}"
+      CHROMIUM_SINGLE_PROCESS:   "${CHROMIUM_SINGLE_PROCESS:-0}"
     shm_size: "2gb"
     ipc: host
     cap_add:
