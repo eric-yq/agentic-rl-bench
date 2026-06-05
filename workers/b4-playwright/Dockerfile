@@ -22,21 +22,24 @@ EXPOSE 8004
 # Set to a fixed integer to cap (e.g. for fairness across archs).
 ENV MAX_CONTEXTS=0
 
-# Multi-process Chromium with a small pool per worker. Each uvicorn
-# worker process owns its own Chromium master + a pre-created pool
-# of MAX_CONTEXTS BrowserContexts. Total in-flight contexts =
-# WORKERS * MAX_CONTEXTS.
+# Multi-process Chromium with a generous pool per worker. Each
+# uvicorn worker process owns its own Chromium master + a pre-
+# created pool of MAX_CONTEXTS BrowserContexts.
 #
-# CRITICAL: WORKERS must stay <= vCPU. Each Chromium master takes
-# a real CPU; running more masters than vCPUs makes the kernel
-# scheduler thrash and DROPS observed CPU utilisation. Empirically
-# 32 masters on 16 vCPU hit ~10% CPU usage from context-switch
-# overhead alone - vCPU/2 is the sweet spot.
+# Sizing rationale (verified by `B4_TRACE=1` measurements):
+#   - WORKERS must stay <= vCPU/2. Each master takes a real CPU
+#     and competes with renderer threads; oversubscribing makes the
+#     scheduler thrash and CPU% drops by 4-5x.
+#   - MAX_CONTEXTS = 8 absorbs SO_REUSEPORT TCP accept imbalance.
+#     Even when the kernel hashes half of all client connections
+#     onto one worker, that worker has 8 slots available so
+#     pool_wait stays under 1s.
+#   - Total slots = WORKERS * 8.
 #
 # Auto-scaling:
-#   4xlarge   (16 vCPU): 8 workers x 4 ctx = 32 total slots
-#   16xlarge  (64 vCPU): 32 workers x 4 ctx = 128 total slots
-#   24xlarge  (96 vCPU): 48 workers x 4 ctx = 192 total slots
+#   4xlarge   (16 vCPU): 8 workers x 8 ctx = 64 total slots
+#   16xlarge  (64 vCPU): 32 workers x 8 ctx = 256 total slots
+#   24xlarge  (96 vCPU): 48 workers x 8 ctx = 384 total slots
 ENV B4_UVICORN_WORKERS=auto
 
 CMD ["sh", "-c", "\

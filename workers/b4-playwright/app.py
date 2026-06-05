@@ -47,19 +47,18 @@ from pydantic import BaseModel
 def _default_max_contexts() -> int:
     """Per-uvicorn-worker context-pool size.
 
-    Default to 4: combined with the launch script's WORKERS = vCPU/2,
-    we get WORKERS * MAX_CONTEXTS = 2*vCPU total in-flight contexts.
-    Important: Chromium master count = WORKERS, must stay <= vCPU
-    or the kernel scheduler thrashes (we tried 32 masters on 16 vCPU
-    and CPU dropped to ~10% from context-switch overhead).
+    Default to 8 so each worker can absorb load imbalance from the
+    kernel's SO_REUSEPORT TCP accept distribution. With WORKERS =
+    vCPU/2 = 8 on a 4xlarge, total slots = 64; for a c=32 sweep that
+    means even a worst-case hash that piles 16 connections onto one
+    worker still has half its slots free, keeping pool_wait < 1s.
 
-    The previous problem this module had was *load imbalance* across
-    workers caused by HTTP keep-alive pinning each TCP connection to
-    one worker for its lifetime. That's now fixed on the client side
-    by `max_keepalive_connections=0` in the orchestrator runner, which
-    forces the kernel's SO_REUSEPORT to load-balance every request.
+    Chromium master process count = WORKERS, NOT WORKERS * MAX_CONTEXTS;
+    the master fans out to lightweight renderer processes per active
+    context, but renderers are mostly IPC-blocked so total active
+    CPU is bounded by master count. WORKERS must stay <= vCPU.
     """
-    return 4
+    return 8
 
 
 MAX_CONTEXTS = int(os.getenv("MAX_CONTEXTS", "0")) or _default_max_contexts()
