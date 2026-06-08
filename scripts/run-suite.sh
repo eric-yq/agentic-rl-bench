@@ -19,7 +19,18 @@ cd "$(dirname "$0")/.."
 bash scripts/ensure-docker.sh
 
 if [[ -f .env ]]; then
-  set -a; source .env; set +a
+  # Existing shell env wins over .env (so e.g. `CONCURRENCIES=128 ./run-suite.sh`
+  # actually overrides what's in .env, instead of being silently
+  # squashed by `source .env`).
+  while IFS='=' read -r key val; do
+    [[ -z "${key}" || "${key}" =~ ^[[:space:]]*# ]] && continue
+    key="${key#export }"
+    key="${key// /}"
+    if [[ -z "${!key+x}" ]]; then
+      val="${val%\"}"; val="${val#\"}"
+      export "${key}=${val}"
+    fi
+  done < .env
 fi
 
 : "${REGISTRY:?set REGISTRY in .env}"

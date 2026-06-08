@@ -9,7 +9,22 @@ cd "$(dirname "$0")/.."
 bash scripts/ensure-docker.sh
 
 if [[ -f .env ]]; then
-  set -a; source .env; set +a
+  # `set -a` exports anything we read from .env, but anything already
+  # in the environment (passed on the command line or via `export`)
+  # wins via this loop - we only set variables that aren't yet defined.
+  while IFS='=' read -r key val; do
+    # skip blanks and comments
+    [[ -z "${key}" || "${key}" =~ ^[[:space:]]*# ]] && continue
+    # strip leading 'export ' if present
+    key="${key#export }"
+    key="${key// /}"
+    # only set if unset; cmdline / shell env overrides .env
+    if [[ -z "${!key+x}" ]]; then
+      # strip surrounding quotes from val if any
+      val="${val%\"}"; val="${val#\"}"
+      export "${key}=${val}"
+    fi
+  done < .env
 fi
 
 : "${REGISTRY:?set REGISTRY in .env}"
