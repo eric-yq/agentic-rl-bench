@@ -53,6 +53,9 @@ services:
       PRICE_C7I_4XL: ${PRICE_C7I_4XL}
       PRICE_C8G_4XL: ${PRICE_C8G_4XL}
       B8_TRIALS: ${B8_TRIALS}
+      B8_IMAGE: ${B8_IMAGE:-python:3.11-slim}
+      B9_DURATION_SEC: ${B9_DURATION_SEC:-1800}
+      B9_CONCURRENCIES: ${B9_CONCURRENCIES:-64,256,1024}
       SKIP: ${SKIP:-}
       # Service endpoints (used by runners)
       B1_WORKER_URL: http://b1-codeexec-worker:8001
