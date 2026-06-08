@@ -31,7 +31,7 @@ class Config:
 
     # Pricing (USD/h, 4xlarge baseline)
     price_c7i_4xl: float = field(default_factory=lambda: float(os.getenv("PRICE_C7I_4XL", "0.7140")))
-    price_c8g_4xl: float = field(default_factory=lambda: float(os.getenv("PRICE_C8G_4XL", "0.5808")))
+    price_c8g_4xl: float = field(default_factory=lambda: float(os.getenv("PRICE_C8G_4XL", "0.6381")))
 
     # Service endpoints
     b1_worker_url: str = field(default_factory=lambda: os.getenv("B1_WORKER_URL", "http://b1-codeexec-worker:8001"))
