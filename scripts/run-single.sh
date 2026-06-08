@@ -44,7 +44,7 @@ case "${BID}" in
   B5) WORKERS=(b5-sql-runner) ;;
   B7) WORKERS=(b7-textgame) ;;
   B8) WORKERS=() ;;  # only needs docker socket; no long-running workers
-  B9) WORKERS=(b1-codeexec-worker b3-mock-api b5-sql-runner) ;;
+  B9) WORKERS=(b1-codeexec-worker b3-mock-api b4-webarena-static b4-playwright-worker b5-sql-runner b7-textgame) ;;
   *)  echo "unknown benchmark id: ${BID}"; exit 2 ;;
 esac
 

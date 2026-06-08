@@ -18,7 +18,7 @@
 | B6  | DataSci             | ⏸️   | 占位                                                                  | -                                         |
 | B7  | Sim-TextGame        | ✅   | ALFWorld/TextWorld-style minigrid（8 房间 + 30 物品 + 6 个 goal 模板），每 episode 30–50 步纯 Python 循环 | b7-textgame (FastAPI + 多 uvicorn worker) |
 | B8  | ColdStart           | ✅   | `docker run python:3.11-slim` × N 次，挂钟测沙盒拉起开销                | orchestrator 通过 docker socket 起 container |
-| B9  | Concurrent-Rollout  | ✅   | 端到端综合：每个 rollout 是 10–30 步 mini-episode，按 B3:60% / B1:25% / B5:15% 抽 task；并发 64→256→1024，**默认 30 分钟稳态** | 复用 b1-codeexec + b3-mock-api + b5-sql-runner |
+| B9  | Concurrent-Rollout  | ✅   | 端到端综合：每个 rollout 是 10–30 步 mini-episode，按 B3:50% / B1:20% / B4:10% / B5:10% / B7:10% 抽 task；并发 64→256→1024，**默认 30 分钟稳态** | 复用 b1-codeexec + b3-mock-api + b4-playwright + b4-webarena-static + b5-sql-runner + b7-textgame |
 
 详细每个子项的 trajectory / corpus / 数据集来源见各 runner 模块顶部 docstring：
 
