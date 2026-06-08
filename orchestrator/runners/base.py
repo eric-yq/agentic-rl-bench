@@ -43,18 +43,44 @@ class BenchmarkResult:
 
 
 def hourly_price(instance_type: str, cfg: Config) -> float:
-    """Best-effort lookup of $/h for cost-per-rollout calculation."""
+    """Best-effort lookup of $/h for cost-per-rollout calculation.
+
+    We anchor pricing on the .4xlarge SKUs (which the user configures
+    in .env) and scale linearly by vCPU for larger sizes. AWS On-Demand
+    pricing is in fact perfectly linear within a family (e.g.
+    c8g.16xlarge = 4 x c8g.4xlarge), so this is exact for every standard
+    size: large / xlarge / 2xlarge / 4xlarge / 8xlarge / 12xlarge /
+    16xlarge / 24xlarge / 48xlarge.
+    """
     t = instance_type.lower()
-    if t.startswith("c7i.4xlarge"):
-        return cfg.price_c7i_4xl
-    if t.startswith("c8g.4xlarge"):
-        return cfg.price_c8g_4xl
-    # Linear-by-vCPU fallback for other sizes (very rough)
-    if t.startswith("c7i."):
-        return cfg.price_c7i_4xl  # caller can override
-    if t.startswith("c8g."):
-        return cfg.price_c8g_4xl
-    return 0.0
+    # vCPU implied by instance size suffix (AWS standard).
+    size_to_vcpus = {
+        "large":     2,  "xlarge":     4,
+        "2xlarge":   8,  "4xlarge":   16,  "8xlarge":   32,
+        "12xlarge": 48,  "16xlarge":  64,  "24xlarge":  96,
+        "48xlarge": 192,
+    }
+    # parse "<family>.<size>" e.g. "c8g.24xlarge"
+    parts = t.split(".")
+    if len(parts) < 2:
+        return 0.0
+    family, size = parts[0], parts[1]
+    vcpus = size_to_vcpus.get(size)
+    if vcpus is None:
+        return 0.0
+    # Pick the per-vCPU baseline price.
+    base_4xl = None
+    if family.startswith("c7i") or family.startswith("m7i"):
+        base_4xl = cfg.price_c7i_4xl
+    elif family.startswith("c8g") or family.startswith("m8g") or family.startswith("m9g"):
+        base_4xl = cfg.price_c8g_4xl
+    elif family.startswith("m8i"):
+        # m8i uses the same Intel pricing curve as c7i/m7i within ~5%
+        base_4xl = cfg.price_c7i_4xl
+    if base_4xl is None:
+        return 0.0
+    # Linear scale: 4xlarge has 16 vCPUs.
+    return base_4xl * (vcpus / 16.0)
 
 
 def cost_block(throughput_per_sec: float, duration: float, instance_type: str, cfg: Config) -> dict:
