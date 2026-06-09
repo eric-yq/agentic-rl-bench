@@ -143,37 +143,180 @@ async def run_benchmark(
     return results
 
 
+# Per-benchmark labels for the report. Each entry says which key to
+# pull out of the throughput dict and how to spell it. We deliberately
+# keep ops/s out of the label - "ops" hides what's actually being
+# counted (a code-exec is very different from a 30-step rollout).
+PRIMARY_UNITS = {
+    "B1": {"tput_key": "executions_per_sec",     "unit": "exec/s",     "title": "Code Execution"},
+    "B3": {"tput_key": "trajectories_per_sec",   "unit": "traj/s",     "title": "Tool Call"},
+    "B4": {"tput_key": "trajectories_per_sec",   "unit": "traj/s",     "title": "Browser"},
+    "B5": {"tput_key": "queries_per_sec",        "unit": "queries/s",  "title": "SQL Exec (TPC-H)"},
+    "B7": {"tput_key": "episodes_per_sec",       "unit": "ep/s",       "title": "Text Game"},
+    "B8": {"tput_key": "container_starts_per_sec", "unit": "starts/s", "title": "Cold Start"},
+    "B9": {"tput_key": "rollouts_per_sec",       "unit": "rollouts/s", "title": "Concurrent Rollout"},
+}
+
+
+def _primary_throughput(bid: str, throughput: dict) -> tuple[float, str]:
+    """Return (value, unit_label) for the row's primary throughput.
+
+    Falls back to the first entry of `throughput` if `bid` isn't in
+    the table or the expected key is missing - avoids silently zeroing
+    out throughput when a runner is added without updating PRIMARY_UNITS.
+    """
+    if not isinstance(throughput, dict) or not throughput:
+        return 0.0, "ops/s"
+    info = PRIMARY_UNITS.get(bid)
+    if info and info["tput_key"] in throughput:
+        return throughput[info["tput_key"]] or 0.0, info["unit"]
+    # Fallback: first numeric value, generic label.
+    k, v = next(iter(throughput.items()))
+    return (v or 0.0), "ops/s"
+
+
 def render_html(summary: dict, out_path: Path) -> None:
-    """Minimal Chart.js report - single page summary."""
-    rows = []
-    for bid, runs in summary["benchmarks"].items():
-        for r in runs:
-            tput = next(iter(r["throughput"].values()), 0) if r["throughput"] else 0
-            p99 = _extract_p99(r["latency_ms"])
-            rows.append({
-                "benchmark": bid,
-                "concurrency": r["concurrency"],
-                "throughput": tput,
-                "p99_ms": p99,
-                "cpu_avg": r["resource"].get("cpu_util_avg"),
-                "cost_per_1k": r["cost"].get("cost_per_1k_units_usd"),
-            })
+    """Minimal report - main table + per-benchmark sub-task sections.
+
+    Improvements over a flat ops/s view:
+      1. Throughput cell shows the right unit per benchmark (exec/s,
+         traj/s, queries/s, rollouts/s, ...) so the same number isn't
+         mis-read across rows.
+      2. B5 emits a per-query (Q01..Q22) latency table for each
+         concurrency level. B9 emits a per-task (B1/B3/B4/B5/B7)
+         latency table and ops breakdown for each concurrency level.
+         Without these, the sub-task data the runners already collect
+         is invisible from the report.
+    """
 
     def cell(v, fmt=".2f"):
         if v is None:
             return "<td>-</td>"
         return f"<td>{v:{fmt}}</td>"
 
-    body_rows = "".join(
-        f"<tr><td style='text-align:left'>{r['benchmark']}</td>"
-        f"<td>{r['concurrency']}</td>"
-        f"{cell(r['throughput'], '.2f')}"
-        f"{cell(r['p99_ms'], '.1f')}"
-        f"{cell(r['cpu_avg'], '.1f')}"
-        f"{cell(r['cost_per_1k'], '.4f')}"
-        "</tr>"
-        for r in rows
-    )
+    # ----- main table -----
+    main_rows: list[str] = []
+    for bid, runs in summary["benchmarks"].items():
+        title = PRIMARY_UNITS.get(bid, {}).get("title", "")
+        bid_label = f"{bid}<br><span style='color:#888;font-size:.8em'>{title}</span>" if title else bid
+        for r in runs:
+            tput, unit = _primary_throughput(bid, r["throughput"])
+            p99 = _extract_p99(r["latency_ms"])
+            cpu_avg = r["resource"].get("cpu_util_avg")
+            cost_1k = r["cost"].get("cost_per_1k_units_usd")
+            main_rows.append(
+                f"<tr><td style='text-align:left'>{bid_label}</td>"
+                f"<td>{r['concurrency']}</td>"
+                f"<td>{tput:,.2f} <span style='color:#888;font-size:.85em'>{unit}</span></td>"
+                f"{cell(p99, '.1f')}"
+                f"{cell(cpu_avg, '.1f')}"
+                f"{cell(cost_1k, '.4f')}"
+                "</tr>"
+            )
+    body_rows = "".join(main_rows)
+
+    # ----- B5 per-query sub-table per concurrency -----
+    def render_per_query_section(bid: str, runs: list[dict]) -> str:
+        if not runs:
+            return ""
+        if not any(isinstance(r.get("latency_ms"), dict)
+                   and r["latency_ms"].get("per_query") for r in runs):
+            return ""
+        out = [f"<h2>{bid} - per-query latency (TPC-H Q01..Q22)</h2>"]
+        for r in runs:
+            pq = (r.get("latency_ms") or {}).get("per_query") or {}
+            if not pq:
+                continue
+            out.append(f"<h3 style='font-size:1rem;margin-top:1rem'>c={r['concurrency']}</h3>")
+            out.append("<table>")
+            out.append(
+                "<tr><th style='text-align:left'>Query</th><th>count</th>"
+                "<th>p50 (ms)</th><th>p95 (ms)</th><th>p99 (ms)</th>"
+                "<th>mean (ms)</th><th>max (ms)</th></tr>"
+            )
+            # sort by query id (keys like Q01..Q22)
+            for qkey in sorted(pq.keys()):
+                row = pq[qkey] or {}
+                out.append(
+                    f"<tr><td style='text-align:left'>{qkey}</td>"
+                    f"<td>{int(row.get('count', 0))}</td>"
+                    f"{cell(row.get('p50'), '.1f')}"
+                    f"{cell(row.get('p95'), '.1f')}"
+                    f"{cell(row.get('p99'), '.1f')}"
+                    f"{cell(row.get('mean'), '.1f')}"
+                    f"{cell(row.get('max'), '.1f')}"
+                    "</tr>"
+                )
+            out.append("</table>")
+        return "\n".join(out)
+
+    # ----- B9 per-task + ops breakdown sub-tables per concurrency -----
+    def render_per_task_section(bid: str, runs: list[dict]) -> str:
+        if not runs:
+            return ""
+        if not any(isinstance(r.get("latency_ms"), dict)
+                   and r["latency_ms"].get("per_task") for r in runs):
+            return ""
+        out = [f"<h2>{bid} - per-task latency &amp; ops mix</h2>"]
+        for r in runs:
+            pt = (r.get("latency_ms") or {}).get("per_task") or {}
+            if not pt:
+                continue
+            extra = r.get("extra") or {}
+            ops_break = extra.get("ops_breakdown") or {}
+            mix = extra.get("task_mix") or {}
+            avg_steps = extra.get("avg_steps_per_rollout")
+
+            header_bits = [f"c={r['concurrency']}"]
+            if avg_steps is not None:
+                header_bits.append(f"avg steps/rollout={avg_steps}")
+            out.append(
+                f"<h3 style='font-size:1rem;margin-top:1rem'>{' &middot; '.join(header_bits)}</h3>"
+            )
+
+            # per-task latency table (one row per sub-benchmark)
+            out.append("<table>")
+            out.append(
+                "<tr><th style='text-align:left'>Sub-task</th>"
+                "<th>weight</th><th>ops</th><th>count</th>"
+                "<th>p50 (ms)</th><th>p95 (ms)</th><th>p99 (ms)</th>"
+                "<th>mean (ms)</th><th>max (ms)</th></tr>"
+            )
+            for tkey in sorted(pt.keys()):
+                row = pt[tkey] or {}
+                w = mix.get(tkey)
+                ops = ops_break.get(tkey, row.get("ops"))
+                w_cell = f"{w:.2f}" if isinstance(w, (int, float)) else "-"
+                ops_cell = f"{int(ops)}" if ops is not None else "-"
+                out.append(
+                    f"<tr><td style='text-align:left'>{tkey} "
+                    f"<span style='color:#888;font-size:.85em'>"
+                    f"{PRIMARY_UNITS.get(tkey, {}).get('title', '')}</span></td>"
+                    f"<td>{w_cell}</td>"
+                    f"<td>{ops_cell}</td>"
+                    f"<td>{int(row.get('count', 0))}</td>"
+                    f"{cell(row.get('p50'), '.1f')}"
+                    f"{cell(row.get('p95'), '.1f')}"
+                    f"{cell(row.get('p99'), '.1f')}"
+                    f"{cell(row.get('mean'), '.1f')}"
+                    f"{cell(row.get('max'), '.1f')}"
+                    "</tr>"
+                )
+            out.append("</table>")
+        return "\n".join(out)
+
+    sub_sections: list[str] = []
+    for bid, runs in summary["benchmarks"].items():
+        # Currently B5 carries per_query and B9 carries per_task; the
+        # generic checks above handle either case if a future runner
+        # adopts the same shape.
+        sec = render_per_query_section(bid, runs)
+        if sec:
+            sub_sections.append(sec)
+        sec = render_per_task_section(bid, runs)
+        if sec:
+            sub_sections.append(sec)
+    sub_html = "\n".join(sub_sections)
 
     inst = summary["instance"]
     html = f"""<!doctype html>
@@ -186,6 +329,7 @@ table{{border-collapse:collapse;width:100%;margin:1rem 0}}
 th,td{{border:1px solid #ddd;padding:6px 10px;text-align:right}}
 th{{background:#f5f5f5}}
 h1{{font-size:1.4rem}} h2{{font-size:1.1rem;margin-top:2rem}}
+h3{{font-size:1rem;margin-top:1rem;color:#444}}
 .meta{{color:#666;font-size:.9rem}}
 </style></head><body>
 <h1>Agentic-RL Sandbox Benchmark</h1>
@@ -196,10 +340,11 @@ h1{{font-size:1.4rem}} h2{{font-size:1.1rem;margin-top:2rem}}
 </p>
 <h2>All runs</h2>
 <table>
-<tr><th>Benchmark</th><th>Concurrency</th><th>Throughput (ops/s)</th>
-    <th>P99 (ms)</th><th>CPU avg (%)</th><th>$/1k ops</th></tr>
+<tr><th>Benchmark</th><th>Concurrency</th><th>Throughput</th>
+    <th>P99 (ms)</th><th>CPU avg (%)</th><th>$/1k units</th></tr>
 {body_rows}
 </table>
+{sub_html}
 </body></html>
 """
     out_path.write_text(html)
